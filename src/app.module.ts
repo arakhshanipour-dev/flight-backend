@@ -13,6 +13,9 @@ import { RegistrationRequestsModule } from './registration-requests/registration
 import { AgencyUsersModule } from './agency-users/agency-users.module';
 import { TicketsModule } from './tickets/tickets.module';
 import { BankCardsModule } from './bank-cards/bank-cards.module';
+import { InvoicesModule } from './invoices/invoices.module';
+import { PaymentsModule } from './payments/payments.module';
+import { OrganizationsModule } from './organizations/organizations.module';
 
 @Module({
   imports: [
@@ -36,6 +39,9 @@ import { BankCardsModule } from './bank-cards/bank-cards.module';
     AgencyUsersModule,
     TicketsModule,
     BankCardsModule,
+    InvoicesModule,
+    PaymentsModule,
+    OrganizationsModule,
   ],
   providers: [
     {
