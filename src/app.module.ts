@@ -18,6 +18,7 @@ import { PaymentsModule } from './payments/payments.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { SupportTicketsModule } from './support-tickets/support-tickets.module';
 import { AccountingModule } from './accounting/accounting.module';
+import { PlansModule } from './plans/plans.module';
 
 @Module({
   imports: [
@@ -25,14 +26,23 @@ import { AccountingModule } from './accounting/accounting.module';
       isGlobal: true,
       envFilePath: '.env',
     }),
-    ThrottlerModule.forRoot({
-      throttlers: [
-        {
-          ttl: 60,
-          limit: 100,
-        },
-      ],
-    }),
+    ThrottlerModule.forRoot([
+      {
+        name: 'default',
+        ttl: 60000,
+        limit: 100,
+      },
+      {
+        name: 'auth',
+        ttl: 60000,
+        limit: 10,
+      },
+      {
+        name: 'sensitive',
+        ttl: 60000,
+        limit: 20,
+      },
+    ]),
     PrismaModule,
     AuthModule,
     UsersModule,
@@ -46,19 +56,20 @@ import { AccountingModule } from './accounting/accounting.module';
     OrganizationsModule,
     SupportTicketsModule,
     AccountingModule,
+    PlansModule,
   ],
   providers: [
     {
       provide: APP_GUARD,
-      useClass: JwtAuthGuard, // JWT guard global
+      useClass: JwtAuthGuard,
     },
     {
       provide: APP_GUARD,
-      useClass: RolesGuard, // Roles guard global
+      useClass: RolesGuard,
     },
     {
       provide: APP_GUARD,
-      useClass: ThrottlerGuard, // Rate limiting global
+      useClass: ThrottlerGuard,
     },
   ],
 })

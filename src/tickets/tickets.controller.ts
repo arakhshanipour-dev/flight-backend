@@ -9,7 +9,9 @@ import {
   Query,
   HttpCode,
   HttpStatus,
-  UseGuards,
+  ParseUUIDPipe,
+  ValidationPipe,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -36,17 +38,18 @@ import { UserRole, TicketStatus } from '@prisma/client';
 export class TicketsController {
   constructor(private readonly ticketsService: TicketsService) {}
 
-  // ============ Normal User & Manager Endpoints ============
-
   @Post()
   @Roles(UserRole.NORMAL_USER, UserRole.AGENCY_MANAGER, UserRole.GENERAL_MANAGER)
-  @ApiOperation({ summary: 'Create a new ticket (Normal User or Manager)' })
+  @ApiOperation({ summary: 'Create a new ticket' })
   async create(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') userId: string,
     @CurrentUser('role') userRole: UserRole,
-    @Body() dto: CreateTicketDto,
+    @Body(ValidationPipe) dto: CreateTicketDto,
   ) {
+    if (!agencyId) {
+      throw new BadRequestException('Agency ID not found');
+    }
     return this.ticketsService.create(agencyId, userId, dto);
   }
 
@@ -66,6 +69,9 @@ export class TicketsController {
     @Query('status') status?: TicketStatus,
     @Query('search') search?: string,
   ) {
+    if (!agencyId) {
+      throw new BadRequestException('Agency ID not found');
+    }
     return this.ticketsService.findAll(
       agencyId,
       userId,
@@ -84,8 +90,11 @@ export class TicketsController {
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') userId: string,
     @CurrentUser('role') userRole: UserRole,
-    @Param('ticketId') ticketId: string,
+    @Param('ticketId', ParseUUIDPipe) ticketId: string,
   ) {
+    if (!agencyId) {
+      throw new BadRequestException('Agency ID not found');
+    }
     return this.ticketsService.findOne(agencyId, userId, userRole, ticketId);
   }
 
@@ -96,47 +105,57 @@ export class TicketsController {
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') userId: string,
     @CurrentUser('role') userRole: UserRole,
-    @Param('ticketId') ticketId: string,
-    @Body() dto: UpdateTicketDto,
+    @Param('ticketId', ParseUUIDPipe) ticketId: string,
+    @Body(ValidationPipe) dto: UpdateTicketDto,
   ) {
+    if (!agencyId) {
+      throw new BadRequestException('Agency ID not found');
+    }
     return this.ticketsService.update(agencyId, userId, userRole, ticketId, dto);
   }
 
   @Delete(':ticketId')
   @Roles(UserRole.NORMAL_USER, UserRole.AGENCY_MANAGER, UserRole.GENERAL_MANAGER)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Delete a ticket (only if not invoiced or finalized)' })
+  @ApiOperation({ summary: 'Delete a ticket' })
   async delete(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') userId: string,
     @CurrentUser('role') userRole: UserRole,
-    @Param('ticketId') ticketId: string,
+    @Param('ticketId', ParseUUIDPipe) ticketId: string,
   ) {
+    if (!agencyId) {
+      throw new BadRequestException('Agency ID not found');
+    }
     return this.ticketsService.delete(agencyId, userId, userRole, ticketId);
   }
 
-  // ============ Unlock Request Endpoints ============
-
   @Post(':ticketId/request-unlock')
   @Roles(UserRole.NORMAL_USER)
-  @ApiOperation({ summary: 'Request to unlock a finalized/invoiced ticket (Normal User only)' })
+  @ApiOperation({ summary: 'Request to unlock a finalized/invoiced ticket' })
   async requestUnlock(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') userId: string,
-    @Param('ticketId') ticketId: string,
-    @Body() dto: RequestUnlockTicketDto,
+    @Param('ticketId', ParseUUIDPipe) ticketId: string,
+    @Body(ValidationPipe) dto: RequestUnlockTicketDto,
   ) {
+    if (!agencyId) {
+      throw new BadRequestException('Agency ID not found');
+    }
     return this.ticketsService.requestUnlock(agencyId, userId, ticketId, dto);
   }
 
   @Get('unlock-requests')
   @Roles(UserRole.AGENCY_MANAGER, UserRole.GENERAL_MANAGER)
-  @ApiOperation({ summary: 'Get all unlock requests (Agency Manager only)' })
+  @ApiOperation({ summary: 'Get all unlock requests' })
   async getUnlockRequests(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') userId: string,
     @CurrentUser('role') userRole: UserRole,
   ) {
+    if (!agencyId) {
+      throw new BadRequestException('Agency ID not found');
+    }
     return this.ticketsService.getUnlockRequests(agencyId, userId, userRole);
   }
 
@@ -146,13 +165,14 @@ export class TicketsController {
   async processUnlockRequest(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') managerId: string,
-    @Param('requestId') requestId: string,
-    @Body() dto: ProcessUnlockRequestDto,
+    @Param('requestId', ParseUUIDPipe) requestId: string,
+    @Body(ValidationPipe) dto: ProcessUnlockRequestDto,
   ) {
+    if (!agencyId) {
+      throw new BadRequestException('Agency ID not found');
+    }
     return this.ticketsService.processUnlockRequest(agencyId, managerId, requestId, dto);
   }
-
-  // ============ General Manager Only Endpoints ============
 
   @Post(':ticketId/force-unlock')
   @Roles(UserRole.GENERAL_MANAGER)
@@ -160,8 +180,11 @@ export class TicketsController {
   async forceUnlockTicket(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') managerId: string,
-    @Param('ticketId') ticketId: string,
+    @Param('ticketId', ParseUUIDPipe) ticketId: string,
   ) {
+    if (!agencyId) {
+      throw new BadRequestException('Agency ID not found');
+    }
     return this.ticketsService.forceUnlockTicket(agencyId, managerId, ticketId);
   }
 }

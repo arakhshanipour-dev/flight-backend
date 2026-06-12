@@ -1,11 +1,15 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { PlansService } from '../plans/plans.service';
 import { CreateTicketDto, UpdateTicketDto, RequestUnlockTicketDto, ProcessUnlockRequestDto, UnlockRequestAction } from './dto';
 import { TicketStatus, UserRole, UserStatus, AgencyStatus } from '@prisma/client';
 
 @Injectable()
 export class TicketsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private plansService: PlansService,
+  ) {}
 
   // ============ Helper Methods ============
 
@@ -76,6 +80,9 @@ export class TicketsService {
   async create(agencyId: string, userId: string, dto: CreateTicketDto) {
     await this.validateAgencyAccess(agencyId, userId, UserRole.NORMAL_USER);
 
+    // Check plan limit for tickets per month
+    await this.plansService.checkTicketLimit(agencyId);
+
     // Check if ticket number already exists in this agency
     const existingTicket = await this.prisma.ticket.findFirst({
       where: {
@@ -94,19 +101,18 @@ export class TicketsService {
         referenceNumber: dto.referenceNumber,
         agencyId: agencyId,
         userId: userId,
-        passengerName: dto.passengerName,
-        passengerPhone: dto.passengerPhone,
-        flightNumber: dto.flightNumber,
-        origin: dto.origin,
-        destination: dto.destination,
+        passengerName: this.sanitizeString(dto.passengerName),
+        passengerPhone: this.sanitizeString(dto.passengerPhone),
+        flightNumber: this.sanitizeString(dto.flightNumber),
+        origin: this.sanitizeString(dto.origin),
+        destination: this.sanitizeString(dto.destination),
         flightDate: new Date(dto.flightDate),
-        seatClass: dto.seatClass,
+        seatClass: this.sanitizeString(dto.seatClass),
         price: dto.price,
         status: TicketStatus.DRAFT,
       },
     });
 
-    // Log activity
     await this.prisma.activityLog.create({
       data: {
         userId: userId,
@@ -138,7 +144,6 @@ export class TicketsService {
       agencyId: agencyId,
     };
 
-    // For normal users, only show their own tickets
     if (userRole === UserRole.NORMAL_USER) {
       where.userId = userId;
     }
@@ -148,11 +153,12 @@ export class TicketsService {
     }
 
     if (search) {
+      const sanitizedSearch = this.sanitizeString(search);
       where.OR = [
-        { ticketNumber: { contains: search, mode: 'insensitive' } },
-        { passengerName: { contains: search, mode: 'insensitive' } },
-        { passengerPhone: { contains: search, mode: 'insensitive' } },
-        { flightNumber: { contains: search, mode: 'insensitive' } },
+        { ticketNumber: { contains: sanitizedSearch, mode: 'insensitive' } },
+        { passengerName: { contains: sanitizedSearch, mode: 'insensitive' } },
+        { passengerPhone: { contains: sanitizedSearch, mode: 'insensitive' } },
+        { flightNumber: { contains: sanitizedSearch, mode: 'insensitive' } },
       ];
     }
 
@@ -160,7 +166,7 @@ export class TicketsService {
       this.prisma.ticket.findMany({
         where,
         skip,
-        take: limit,
+        take: limit > 100 ? 100 : limit,
         orderBy: { createdAt: 'desc' },
         include: {
           user: {
@@ -187,7 +193,7 @@ export class TicketsService {
       data: tickets,
       meta: {
         page,
-        limit,
+        limit: limit > 100 ? 100 : limit,
         total,
         totalPages: Math.ceil(total / limit),
       },
@@ -237,84 +243,79 @@ export class TicketsService {
     return ticket;
   }
 
-async update(agencyId: string, userId: string, userRole: UserRole, ticketId: string, dto: UpdateTicketDto) {
-  const ticket = await this.getTicketWithAccess(ticketId, agencyId, userId, userRole === UserRole.NORMAL_USER);
+  async update(agencyId: string, userId: string, userRole: UserRole, ticketId: string, dto: UpdateTicketDto) {
+    const ticket = await this.getTicketWithAccess(ticketId, agencyId, userId, userRole === UserRole.NORMAL_USER);
 
-  // Check if ticket is editable
-  if (ticket.status === TicketStatus.INVOICED) {
-    throw new BadRequestException('Cannot edit a ticket that has been invoiced');
-  }
-
-  if (ticket.status === TicketStatus.FINALIZED && userRole === UserRole.NORMAL_USER) {
-    throw new BadRequestException('Cannot edit a finalized ticket. Please request unlock from agency manager.');
-  }
-
-  // If normal user is trying to finalize the ticket
-  let newStatus = dto.status;
-  if (dto.status === TicketStatus.FINALIZED && userRole === UserRole.NORMAL_USER) {
-    // Check if ticket is completed
-    if (ticket.status !== TicketStatus.COMPLETED) {
-      throw new BadRequestException('Ticket must be completed before finalization');
+    if (ticket.status === TicketStatus.INVOICED) {
+      throw new BadRequestException('Cannot edit a ticket that has been invoiced');
     }
-    newStatus = TicketStatus.FINALIZED;
-  }
 
-  // If status is being changed to COMPLETED, check if all required fields are filled
-  if (dto.status === TicketStatus.COMPLETED) {
-    const requiredFields = ['passengerName', 'passengerPhone', 'flightNumber', 'origin', 'destination', 'flightDate', 'seatClass', 'price'];
-    for (const field of requiredFields) {
-      const value = (dto as any)[field] ?? (ticket as any)[field];
-      if (!value) {
-        throw new BadRequestException(`Field ${field} is required to complete the ticket`);
+    if (ticket.status === TicketStatus.FINALIZED && userRole === UserRole.NORMAL_USER) {
+      throw new BadRequestException('Cannot edit a finalized ticket. Please request unlock from agency manager.');
+    }
+
+    let newStatus = dto.status;
+    if (dto.status === TicketStatus.FINALIZED && userRole === UserRole.NORMAL_USER) {
+      if (ticket.status !== TicketStatus.COMPLETED) {
+        throw new BadRequestException('Ticket must be completed before finalization');
+      }
+      newStatus = TicketStatus.FINALIZED;
+    }
+
+    if (dto.status === TicketStatus.COMPLETED) {
+      const requiredFields = ['passengerName', 'passengerPhone', 'flightNumber', 'origin', 'destination', 'flightDate', 'seatClass', 'price'];
+      for (const field of requiredFields) {
+        const value = (dto as any)[field] ?? (ticket as any)[field];
+        if (!value) {
+          throw new BadRequestException(`Field ${field} is required to complete the ticket`);
+        }
       }
     }
+
+    const updateData: any = {
+      ticketNumber: dto.ticketNumber ? this.sanitizeString(dto.ticketNumber) : undefined,
+      referenceNumber: dto.referenceNumber ? this.sanitizeString(dto.referenceNumber) : undefined,
+      passengerName: dto.passengerName ? this.sanitizeString(dto.passengerName) : undefined,
+      passengerPhone: dto.passengerPhone ? this.sanitizeString(dto.passengerPhone) : undefined,
+      flightNumber: dto.flightNumber ? this.sanitizeString(dto.flightNumber) : undefined,
+      origin: dto.origin ? this.sanitizeString(dto.origin) : undefined,
+      destination: dto.destination ? this.sanitizeString(dto.destination) : undefined,
+      seatClass: dto.seatClass ? this.sanitizeString(dto.seatClass) : undefined,
+      price: dto.price,
+      status: newStatus,
+    };
+
+    if (dto.flightDate) {
+      updateData.flightDate = new Date(dto.flightDate);
+    }
+
+    if (newStatus === TicketStatus.FINALIZED && ticket.status !== TicketStatus.FINALIZED) {
+      updateData.finalizedAt = new Date();
+    }
+
+    const updatedTicket = await this.prisma.ticket.update({
+      where: { id: ticketId },
+      data: updateData,
+    });
+
+    await this.prisma.activityLog.create({
+      data: {
+        userId: userId,
+        agencyId: agencyId,
+        action: 'UPDATE_TICKET',
+        entityType: 'Ticket',
+        entityId: ticketId,
+        oldData: { oldStatus: ticket.status },
+        newData: { newStatus: updatedTicket.status },
+      },
+    });
+
+    return updatedTicket;
   }
 
-  const updateData: any = {
-    ticketNumber: dto.ticketNumber,
-    referenceNumber: dto.referenceNumber,
-    passengerName: dto.passengerName,
-    passengerPhone: dto.passengerPhone, // Fixed: was 'passonumbergerPhone'
-    flightNumber: dto.flightNumber,
-    origin: dto.origin,
-    destination: dto.destination,
-    seatClass: dto.seatClass,
-    price: dto.price,
-    status: newStatus,
-  };
-
-  if (dto.flightDate) {
-    updateData.flightDate = new Date(dto.flightDate);
-  }
-
-  if (newStatus === TicketStatus.FINALIZED && ticket.status !== TicketStatus.FINALIZED) {
-    updateData.finalizedAt = new Date();
-  }
-
-  const updatedTicket = await this.prisma.ticket.update({
-    where: { id: ticketId },
-    data: updateData,
-  });
-
-  // Log activity
-  await this.prisma.activityLog.create({
-    data: {
-      userId: userId,
-      agencyId: agencyId,
-      action: 'UPDATE_TICKET',
-      entityType: 'Ticket',
-      entityId: ticketId,
-      oldData: { oldStatus: ticket.status },
-      newData: { newStatus: updatedTicket.status },
-    },
-  });
-
-  return updatedTicket;
-}
   async delete(agencyId: string, userId: string, userRole: UserRole, ticketId: string) {
     const ticket = await this.getTicketWithAccess(ticketId, agencyId, userId, userRole === UserRole.NORMAL_USER);
 
-    // Check if ticket can be deleted
     if (ticket.status === TicketStatus.INVOICED) {
       throw new BadRequestException('Cannot delete a ticket that has been invoiced');
     }
@@ -340,21 +341,14 @@ async update(agencyId: string, userId: string, userRole: UserRole, ticketId: str
 
   // ============ Unlock Request Methods ============
 
-  async requestUnlock(
-    agencyId: string,
-    userId: string,
-    ticketId: string,
-    dto: RequestUnlockTicketDto,
-  ) {
+  async requestUnlock(agencyId: string, userId: string, ticketId: string, dto: RequestUnlockTicketDto) {
     await this.validateAgencyAccess(agencyId, userId, UserRole.NORMAL_USER);
     const ticket = await this.getTicketWithAccess(ticketId, agencyId, userId, true);
 
-    // Check if ticket is in a state that requires unlock
     if (ticket.status !== TicketStatus.FINALIZED && ticket.status !== TicketStatus.INVOICED) {
       throw new BadRequestException('Only finalized or invoiced tickets need unlock request');
     }
 
-    // Check if there's already a pending unlock request
     const existingRequest = await this.prisma.supportTicket.findFirst({
       where: {
         agencyId: agencyId,
@@ -368,12 +362,12 @@ async update(agencyId: string, userId: string, userRole: UserRole, ticketId: str
       throw new BadRequestException('You already have a pending unlock request for this ticket');
     }
 
-    // Create unlock request ticket
+    const sanitizedReason = this.sanitizeString(dto.reason);
     const unlockTicket = await this.prisma.supportTicket.create({
       data: {
         ticketNumber: `UNLOCK-${Date.now()}`,
         title: `درخواست باز کردن بلیط ${ticket.ticketNumber}`,
-        description: `دلیل درخواست: ${dto.reason}\n\nشماره بلیط: ${ticket.ticketNumber}\nمسافر: ${ticket.passengerName}\nپرواز: ${ticket.flightNumber}`,
+        description: `دلیل درخواست: ${sanitizedReason}\n\nشماره بلیط: ${ticket.ticketNumber}\nمسافر: ${ticket.passengerName}\nپرواز: ${ticket.flightNumber}`,
         status: 'OPEN',
         priority: 'MEDIUM',
         senderType: 'AGENCY',
@@ -383,7 +377,6 @@ async update(agencyId: string, userId: string, userRole: UserRole, ticketId: str
       },
     });
 
-    // Create a penalty for the user
     await this.prisma.penalty.create({
       data: {
         userId: userId,
@@ -401,7 +394,7 @@ async update(agencyId: string, userId: string, userRole: UserRole, ticketId: str
         action: 'REQUEST_UNLOCK_TICKET',
         entityType: 'Ticket',
         entityId: ticketId,
-        newData: { reason: dto.reason },
+        newData: { reason: sanitizedReason },
       },
     });
 
@@ -441,12 +434,7 @@ async update(agencyId: string, userId: string, userRole: UserRole, ticketId: str
     return requests;
   }
 
-  async processUnlockRequest(
-    agencyId: string,
-    managerId: string,
-    requestId: string,
-    dto: ProcessUnlockRequestDto,
-  ) {
+  async processUnlockRequest(agencyId: string, managerId: string, requestId: string, dto: ProcessUnlockRequestDto) {
     await this.validateAgencyAccess(agencyId, managerId);
     
     const request = await this.prisma.supportTicket.findFirst({
@@ -461,7 +449,6 @@ async update(agencyId: string, userId: string, userRole: UserRole, ticketId: str
       throw new NotFoundException('Unlock request not found');
     }
 
-    // Extract ticket number from title
     const ticketNumberMatch = request.title.match(/بلیط\s+(\S+)/);
     if (!ticketNumberMatch) {
       throw new BadRequestException('Could not find ticket number in request');
@@ -480,7 +467,6 @@ async update(agencyId: string, userId: string, userRole: UserRole, ticketId: str
     }
 
     if (dto.action === UnlockRequestAction.APPROVE) {
-      // Unlock the ticket (set back to DRAFT or COMPLETED)
       await this.prisma.ticket.update({
         where: { id: ticket.id },
         data: {
@@ -508,10 +494,7 @@ async update(agencyId: string, userId: string, userRole: UserRole, ticketId: str
       });
 
       return { message: 'Ticket unlocked successfully. User can now edit the ticket.' };
-    } 
-    
-    else {
-      // Reject the request
+    } else {
       await this.prisma.supportTicket.update({
         where: { id: requestId },
         data: {
@@ -527,7 +510,7 @@ async update(agencyId: string, userId: string, userRole: UserRole, ticketId: str
           action: 'REJECT_UNLOCK_TICKET',
           entityType: 'Ticket',
           entityId: ticket.id,
-          newData: { notes: dto.notes },
+          newData: { notes: dto.notes ? this.sanitizeString(dto.notes) : null },
         },
       });
 
@@ -576,5 +559,12 @@ async update(agencyId: string, userId: string, userRole: UserRole, ticketId: str
       message: 'Ticket forcefully unlocked by General Manager',
       ticket: updatedTicket,
     };
+  }
+
+  // ============ Security Helper ============
+
+  private sanitizeString(input: string): string {
+    if (!input) return input;
+    return input.trim().replace(/[<>]/g, '');
   }
 }

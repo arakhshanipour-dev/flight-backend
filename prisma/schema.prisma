@@ -171,6 +171,7 @@ model User {
   supportTicketReplies SupportTicketReply[] // پاسخ‌های تیکت
   activityLogs         ActivityLog[]
   penalties            Penalty[]
+  refreshTokens        RefreshToken[]
 
   @@unique([agencyId, email]) // یک ایمیل در یک آژانس یکتا است
 }
@@ -389,4 +390,31 @@ model RegistrationRequest {
 
   // Fixed: Changed to one-to-many by removing @relation attribute or keeping it simple
   agency Agency? @relation(fields: [agencyId], references: [id], onDelete: SetNull)
+}
+
+
+model RefreshToken {
+  id         String   @id @default(uuid())
+  token      String   @unique
+  userId     String
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+}
+
+model FailedLoginAttempt {
+  id         String   @id @default(uuid())
+  email      String
+  ipAddress  String?
+  userAgent  String?
+  attemptedAt DateTime @default(now())
+
+  @@index([email])
+  @@index([attemptedAt])
 }
