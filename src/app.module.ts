@@ -17,6 +17,7 @@ import { InvoicesModule } from './invoices/invoices.module';
 import { PaymentsModule } from './payments/payments.module';
 import { OrganizationsModule } from './organizations/organizations.module';
 import { SupportTicketsModule } from './support-tickets/support-tickets.module';
+import { AccountingModule } from './accounting/accounting.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { SupportTicketsModule } from './support-tickets/support-tickets.module';
     PaymentsModule,
     OrganizationsModule,
     SupportTicketsModule,
+    AccountingModule,
   ],
   providers: [
     {
