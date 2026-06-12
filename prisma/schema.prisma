@@ -1,0 +1,392 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============= ENUMS =============
+
+enum UserRole {
+  SUPER_ADMIN // تیم پشتیبانی
+  GENERAL_MANAGER // مدیر کل آژانس
+  AGENCY_MANAGER // مدیر آژانس
+  NORMAL_USER // کاربر عادی آژانس
+  ORGANIZATION_ADMIN // مدیر ارگان (تنها کاربر ارگان)
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum AgencyStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  TRIAL // دمو ۱ ماهه
+}
+
+enum TicketStatus {
+  DRAFT // در حال تکمیل
+  COMPLETED // کامل شده ولی نهایی نشده
+  FINALIZED // نهایی شده (قفل)
+  INVOICED // فاکتور شده
+}
+
+enum InvoiceStatus {
+  UNPAID
+  PAID
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+enum SupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  FORWARDED
+  RESOLVED
+  CLOSED
+}
+
+enum SupportTicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum RegistrationRequestStatus {
+  PENDING
+  CONTACTED
+  APPROVED
+  REJECTED
+  DEMO_CREATED
+}
+
+enum BankCardStatus {
+  ACTIVE
+  INACTIVE
+}
+
+// ============= MODELS =============
+
+// پلن‌های اشتراک آژانس‌ها
+model Plan {
+  id                  String   @id @default(uuid())
+  name                String   @unique // "Basic", "Pro", "Enterprise"
+  description         String?
+  priceMonthly        Float
+  priceYearly         Float
+  maxNormalUsers      Int      @default(5) // حداکثر کاربر عادی
+  maxAgencyManagers   Int      @default(2) // حداکثر مدیر آژانس
+  maxTicketsPerMonth  Int?     @default(100) // اختیاری
+  maxInvoicesPerMonth Int?     @default(50) // اختیاری
+  features            Json? // امکانات اضافی به صورت JSON
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  agencyPlans AgencyPlan[]
+}
+
+// آژانس‌ها
+model Agency {
+  id                 String       @id @default(uuid())
+  name               String       @unique
+  registrationNumber String?      @unique // شماره ثبت/کد اقتصادی
+  phone              String?
+  email              String?      @unique
+  address            String?
+  status             AgencyStatus @default(TRIAL)
+  trialExpiresAt     DateTime? // تاریخ انقضای دمو (۱ ماهه)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  // روابط
+  users                User[]
+  bankCards            BankCard[]
+  invoices             Invoice[]
+  tickets              Ticket[]
+  payments             Payment[]
+  agencyPlans          AgencyPlan[]
+  supportTickets       SupportTicket[] // تیکت‌های ارسال شده به پشتیبانی
+  activityLogs         ActivityLog[]
+  penalties            Penalty[] // امتیازات منفی
+  registrationRequests RegistrationRequest[] // تغییر به one-to-many
+}
+
+// تاریخچه پلن آژانس‌ها (برای پیگیری تغییرات)
+model AgencyPlan {
+  id        String    @id @default(uuid())
+  agencyId  String
+  planId    String
+  startDate DateTime  @default(now())
+  endDate   DateTime? // اگر null باشد، هنوز فعال است
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+
+  agency Agency @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  plan   Plan   @relation(fields: [planId], references: [id])
+
+  @@unique([agencyId, planId, startDate])
+}
+
+// کاربران سیستم
+model User {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  passwordHash String
+  firstName    String
+  lastName     String
+  phone        String?
+  role         UserRole
+  status       UserStatus @default(ACTIVE)
+
+  // اگر کاربر متعلق به آژانسی باشد (برای نقش‌های GENERAL_MANAGER, AGENCY_MANAGER, NORMAL_USER)
+  agencyId       String?
+  // اگر کاربر متعلق به ارگانی باشد (برای نقش ORGANIZATION_ADMIN)
+  organizationId String?
+
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // روابط
+  agency       Agency?       @relation(fields: [agencyId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  tickets              Ticket[] // بلیط‌های ثبت شده توسط کاربر عادی
+  supportTickets       SupportTicket[] // تیکت‌های ارسال شده
+  supportTicketReplies SupportTicketReply[] // پاسخ‌های تیکت
+  activityLogs         ActivityLog[]
+  penalties            Penalty[]
+
+  @@unique([agencyId, email]) // یک ایمیل در یک آژانس یکتا است
+}
+
+// ارگان‌ها (مشتریان حقوقی)
+model Organization {
+  id             String    @id @default(uuid())
+  name           String    @unique
+  nationalId     String?   @unique // شناسه ملی/کد اقتصادی
+  phone          String?
+  email          String?   @unique
+  address        String?
+  hasPanel       Boolean   @default(false) // آیا پنل دارد؟
+  panelCreatedAt DateTime? // تاریخ ایجاد پنل
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // روابط - Changed to One-to-Many
+  users          User[] // مدیران ارگان (تغییر به one-to-many)
+  invoices       Invoice[] // فاکتورهایی که برای این ارگان صادر شده
+  supportTickets SupportTicket[] // تیکت‌های پشتیبانی
+  activityLogs   ActivityLog[] // لاگ فعالیت‌ها
+}
+
+// کارت‌های بانکی هر آژانس
+model BankCard {
+  id            String         @id @default(uuid())
+  agencyId      String
+  cardNumber    String // توکن شده (Tokenized) – هرگز شماره اصلی ذخیره نشود
+  bankName      String
+  accountHolder String
+  sheba         String? // شماره شبا (اختیاری)
+  status        BankCardStatus @default(ACTIVE)
+  isDefault     Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  agency   Agency    @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  invoices Invoice[] // فاکتورهایی که این کارت در آنها به عنوان کارت مقصد انتخاب شده
+  payments Payment[] // پرداخت‌هایی که به این کارت انجام شده
+
+  @@unique([agencyId, cardNumber])
+}
+
+// بلیط
+model Ticket {
+  id              String       @id @default(uuid())
+  ticketNumber    String       @unique // شماره بلیط یکتا
+  referenceNumber String?      @unique // شماره مرجع (از سیستم خارجی یا داخلی)
+  agencyId        String
+  userId          String // کاربر عادی که بلیط را ثبت کرده
+  passengerName   String
+  passengerPhone  String
+  flightNumber    String
+  origin          String // مبدأ
+  destination     String // مقصد
+  flightDate      DateTime
+  seatClass       String // کلاس پرواز (اقتصادی، بیزینس، ...)
+  price           Float // قیمت فروش
+  status          TicketStatus @default(DRAFT)
+  invoiceId       String? // اگر فاکتور شده باشد
+  finalizedAt     DateTime? // تاریخ نهایی شدن
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  agency    Agency    @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id])
+  invoice   Invoice?  @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  penalties Penalty[] // امتیازات منفی مرتبط با این بلیط
+}
+
+// فاکتور
+model Invoice {
+  id             String        @id @default(uuid())
+  invoiceNumber  String        @unique // شماره فاکتور یکتا (مثل INV-2024-0001)
+  agencyId       String
+  organizationId String? // اگر مشتری ارگان است
+  customerName   String // نام مشتری (حقیقی یا نام ارگان)
+  customerPhone  String?
+  bankCardId     String // کارت بانکی مقصد که روی فاکتور درج شده
+  templateStyle  Int           @default(1) // 1, 2, یا 3 (سه طرح مختلف)
+  subtotal       Float // جمع قیمت بلیط‌ها
+  total          Float // مجموع نهایی (با مالیات در آینده)
+  status         InvoiceStatus @default(UNPAID)
+  issuedAt       DateTime      @default(now())
+  paidAt         DateTime? // تاریخ پرداخت
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  agency       Agency        @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  bankCard     BankCard      @relation(fields: [bankCardId], references: [id])
+  tickets      Ticket[] // بلیط‌های این فاکتور
+  payment      Payment? // پرداخت مربوط به این فاکتور (یک به صفر یا یک)
+}
+
+// پرداخت
+model Payment {
+  id           String        @id @default(uuid())
+  invoiceId    String        @unique // هر فاکتور حداکثر یک پرداخت دارد (پرداخت یکجا)
+  agencyId     String
+  bankCardId   String // کارتی که پرداخت به آن انجام شده (همان کارت فاکتور)
+  amount       Float
+  trackingCode String?       @unique // کد رهگیری پرداخت
+  status       PaymentStatus @default(PENDING)
+  paidAt       DateTime? // تاریخ پرداخت (بدون @default)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  invoice  Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  agency   Agency   @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  bankCard BankCard @relation(fields: [bankCardId], references: [id])
+}
+
+// تیکت پشتیبانی (برای آژانس‌ها و ارگان‌ها)
+model SupportTicket {
+  id           String                @id @default(uuid())
+  ticketNumber String                @unique
+  title        String
+  description  String
+  status       SupportTicketStatus   @default(OPEN)
+  priority     SupportTicketPriority @default(MEDIUM)
+
+  // sender: چه کسی فرستاده (می‌تواند آژانس یا ارگان باشد)
+  senderType     String // "AGENCY" یا "ORGANIZATION"
+  agencyId       String? // اگر senderType=AGENCY
+  organizationId String? // اگر senderType=ORGANIZATION
+  userId         String // کاربر فرستنده
+
+  // برای Forward کردن
+  parentTicketId String? // اگر از تیکت دیگری فوروارد شده باشد
+  forwardedTo    String? // "AGENCY_MANAGER", "GENERAL_MANAGER", "SUPPORT"
+
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  agency       Agency?              @relation(fields: [agencyId], references: [id], onDelete: SetNull)
+  organization Organization?        @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  user         User                 @relation(fields: [userId], references: [id])
+  parentTicket SupportTicket?       @relation("TicketForward", fields: [parentTicketId], references: [id])
+  childTickets SupportTicket[]      @relation("TicketForward") // تیکت‌هایی که از این تیکت فوروارد شده‌اند
+  replies      SupportTicketReply[]
+
+  @@index([agencyId, organizationId])
+}
+
+// پاسخ‌های تیکت
+model SupportTicketReply {
+  id         String   @id @default(uuid())
+  ticketId   String
+  userId     String
+  message    String
+  isInternal Boolean  @default(false) // دید داخلی برای پشتیبانی
+  createdAt  DateTime @default(now())
+
+  ticket SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user   User          @relation(fields: [userId], references: [id])
+
+  @@index([ticketId, createdAt])
+}
+
+// لاگ فعالیت‌های کاربران (برای رصد و ارزیابی)
+model ActivityLog {
+  id             String   @id @default(uuid())
+  userId         String
+  agencyId       String?
+  organizationId String?
+  action         String // "CREATE_TICKET", "APPROVE_INVOICE", "VIEW_REPORT", ...
+  entityType     String // "Ticket", "Invoice", "Payment", "User", ...
+  entityId       String?
+  oldData        Json?
+  newData        Json?
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime @default(now())
+
+  user         User          @relation(fields: [userId], references: [id])
+  agency       Agency?       @relation(fields: [agencyId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([userId, agencyId, createdAt])
+}
+
+// امتیازات منفی برای کاربران عادی
+model Penalty {
+  id        String   @id @default(uuid())
+  userId    String
+  agencyId  String
+  points    Int      @default(1) // معمولاً ۱ امتیاز منفی
+  reason    String // "UNLOCK_FROZEN_TICKET"
+  ticketId  String? // بلیط مرتبط
+  createdAt DateTime @default(now())
+
+  user   User    @relation(fields: [userId], references: [id])
+  agency Agency  @relation(fields: [agencyId], references: [id], onDelete: Cascade)
+  ticket Ticket? @relation(fields: [ticketId], references: [id], onDelete: SetNull)
+}
+
+// درخواست ثبت‌نام آژانس از لندینگ پیج
+model RegistrationRequest {
+  id                 String                    @id @default(uuid())
+  agencyName         String
+  registrationNumber String?
+  contactName        String
+  contactPhone       String
+  contactEmail       String
+  message            String?
+  status             RegistrationRequestStatus @default(PENDING)
+  reviewedBy         String? // ادمینی که بررسی کرده
+  reviewedAt         DateTime?
+  notes              String? // یادداشت پشتیبانی
+  agencyId           String? // آژانس ایجاد شده پس از تأیید
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+
+  // Fixed: Changed to one-to-many by removing @relation attribute or keeping it simple
+  agency Agency? @relation(fields: [agencyId], references: [id], onDelete: SetNull)
+}
