@@ -12,6 +12,7 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RegistrationRequestsModule } from './registration-requests/registration-requests.module';
 import { AgencyUsersModule } from './agency-users/agency-users.module';
 import { TicketsModule } from './tickets/tickets.module';
+import { BankCardsModule } from './bank-cards/bank-cards.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { TicketsModule } from './tickets/tickets.module';
     RegistrationRequestsModule,
     AgencyUsersModule,
     TicketsModule,
+    BankCardsModule,
   ],
   providers: [
     {
