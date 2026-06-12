@@ -10,6 +10,8 @@ import { UsersModule } from './users/users.module';
 import { AgenciesModule } from './agencies/agencies.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RegistrationRequestsModule } from './registration-requests/registration-requests.module';
+import { AgencyUsersModule } from './agency-users/agency-users.module';
+import { TicketsModule } from './tickets/tickets.module';
 
 @Module({
   imports: [
@@ -30,6 +32,8 @@ import { RegistrationRequestsModule } from './registration-requests/registration
     UsersModule,
     AgenciesModule,
     RegistrationRequestsModule,
+    AgencyUsersModule,
+    TicketsModule,
   ],
   providers: [
     {
