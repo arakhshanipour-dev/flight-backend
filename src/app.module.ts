@@ -16,6 +16,7 @@ import { BankCardsModule } from './bank-cards/bank-cards.module';
 import { InvoicesModule } from './invoices/invoices.module';
 import { PaymentsModule } from './payments/payments.module';
 import { OrganizationsModule } from './organizations/organizations.module';
+import { SupportTicketsModule } from './support-tickets/support-tickets.module';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { OrganizationsModule } from './organizations/organizations.module';
     InvoicesModule,
     PaymentsModule,
     OrganizationsModule,
+    SupportTicketsModule,
   ],
   providers: [
     {
