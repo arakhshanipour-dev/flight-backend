@@ -1,7 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsString, IsEmail, IsOptional, MinLength, MaxLength, IsEnum, IsDateString } from 'class-validator';
+import { IsString, IsEmail, IsOptional, MinLength, MaxLength, IsEnum } from 'class-validator';
 import { AgencyStatus } from '@prisma/client';
-import { Type } from 'class-transformer';
 
 export class CreateAgencyDto {
   @ApiProperty({ example: 'آژانس هواپیمایی البرز', description: 'نام آژانس' })
@@ -36,8 +35,11 @@ export class CreateAgencyDto {
   status?: AgencyStatus;
 
   @ApiProperty({ example: '2025-01-15T00:00:00Z', required: false, description: 'تاریخ انقضای دمو' })
-  @IsDateString()
   @IsOptional()
-  @Type(() => Date)
   trialExpiresAt?: Date;
+
+  @ApiProperty({ example: 'علی رضایی', required: false, description: 'نام شخص تماس (مدیر کل)' })
+  @IsString()
+  @IsOptional()
+  contactName?: string;
 }

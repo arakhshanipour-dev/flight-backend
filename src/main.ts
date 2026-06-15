@@ -12,6 +12,11 @@ async function bootstrap() {
   const port = configService.get<number>('PORT', 3000);
   const nodeEnv = configService.get<string>('NODE_ENV', 'development');
 
+  app.enableCors({
+  origin: ['http://localhost:3001', 'http://localhost:3000'],
+  credentials: true,
+});
+
   // Security: Helmet with strict CSP
   app.use(
     helmet({

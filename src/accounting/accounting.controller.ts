@@ -32,7 +32,7 @@ export class AccountingController {
   // ============ Agency Dashboard ============
 
   @Get('agency/dashboard')
-  @Roles(UserRole.GENERAL_MANAGER, UserRole.AGENCY_MANAGER)
+  @Roles(UserRole.GENERAL_MANAGER, UserRole.AGENCY_MANAGER, UserRole.NORMAL_USER)  // اضافه کردن NORMAL_USER
   @ApiOperation({ summary: 'Get agency dashboard statistics' })
   async getAgencyDashboard(
     @CurrentUser('agencyId') agencyId: string,

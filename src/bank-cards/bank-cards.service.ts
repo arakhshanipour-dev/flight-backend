@@ -15,8 +15,6 @@ export class BankCardsService {
    * اینجا برای نمونه از یک هش ساده استفاده می‌کنیم
    */
   private tokenizeCardNumber(cardNumber: string): string {
-    // در محیط واقعی: call PSP tokenization API
-    // اینجا فقط برای نمونه از SHA256 استفاده می‌شود
     const hash = crypto.createHash('sha256').update(cardNumber).digest('hex');
     return `tok_${hash.substring(0, 32)}`;
   }
@@ -31,6 +29,9 @@ export class BankCardsService {
     return `${first4}******${last4}`;
   }
 
+  /**
+   * اعتبارسنجی دسترسی مدیریت کارت (فقط مدیر کل)
+   */
   private async validateGeneralManagerAccess(agencyId: string, userId: string) {
     const user = await this.prisma.user.findFirst({
       where: {
@@ -42,7 +43,7 @@ export class BankCardsService {
     });
 
     if (!user) {
-      throw new ForbiddenException('Only General Manager can manage bank cards');
+      throw new ForbiddenException('❌ فقط مدیر کل می‌تواند کارت‌های بانکی را مدیریت کند');
     }
 
     const agency = await this.prisma.agency.findUnique({
@@ -50,18 +51,46 @@ export class BankCardsService {
     });
 
     if (!agency || (agency.status !== AgencyStatus.ACTIVE && agency.status !== AgencyStatus.TRIAL)) {
-      throw new ForbiddenException('Agency is not active');
+      throw new ForbiddenException('❌ آژانس فعال نیست');
     }
 
     return user;
   }
 
-  // ============ CRUD Operations ============
+  /**
+   * اعتبارسنجی دسترسی خواندن کارت (مدیر کل و مدیر آژانس)
+   */
+  private async validateBankCardReadAccess(agencyId: string, userId: string) {
+    const user = await this.prisma.user.findFirst({
+      where: {
+        id: userId,
+        agencyId: agencyId,
+        status: 'ACTIVE',
+        role: { in: [UserRole.GENERAL_MANAGER, UserRole.AGENCY_MANAGER] },
+      },
+    });
+
+    if (!user) {
+      throw new ForbiddenException('❌ شما دسترسی به این بخش را ندارید');
+    }
+
+    const agency = await this.prisma.agency.findUnique({
+      where: { id: agencyId },
+    });
+
+    if (!agency || (agency.status !== AgencyStatus.ACTIVE && agency.status !== AgencyStatus.TRIAL)) {
+      throw new ForbiddenException('❌ آژانس فعال نیست');
+    }
+
+    return user;
+  }
+
+  // ============ مدیریت کارت (فقط مدیر کل) ============
 
   async create(agencyId: string, userId: string, dto: CreateBankCardDto) {
     await this.validateGeneralManagerAccess(agencyId, userId);
 
-    // Check if card number already exists for this agency
+    // بررسی وجود کارت تکراری
     const tokenizedCard = this.tokenizeCardNumber(dto.cardNumber);
     
     const existingCard = await this.prisma.bankCard.findFirst({
@@ -72,17 +101,17 @@ export class BankCardsService {
     });
 
     if (existingCard) {
-      throw new ConflictException('This card number has already been added to this agency');
+      throw new ConflictException('❌ این شماره کارت قبلاً در این آژانس ثبت شده است');
     }
 
-    // If this card is set as default, remove default from other cards
+    // اگر این کارت به عنوان پیش‌فرض انتخاب شده، سایر کارت‌ها را غیرپیش‌فرض کن
     if (dto.isDefault) {
       await this.prisma.bankCard.updateMany({
         where: { agencyId: agencyId },
         data: { isDefault: false },
       });
     } else {
-      // If this is the first card, make it default automatically
+      // اگر اولین کارت است، خودکار به عنوان پیش‌فرض تنظیم شود
       const cardCount = await this.prisma.bankCard.count({ where: { agencyId: agencyId } });
       if (cardCount === 0) {
         dto.isDefault = true;
@@ -101,7 +130,7 @@ export class BankCardsService {
       },
     });
 
-    // Log activity
+    // ثبت لاگ
     await this.prisma.activityLog.create({
       data: {
         userId: userId,
@@ -113,55 +142,10 @@ export class BankCardsService {
       },
     });
 
-    // Return masked card number
     return {
       ...bankCard,
       maskedCardNumber: this.maskCardNumber(dto.cardNumber),
       cardNumber: undefined,
-    };
-  }
-
-  async findAll(agencyId: string, userId: string, status?: BankCardStatus) {
-    await this.validateGeneralManagerAccess(agencyId, userId);
-
-    const where: any = { agencyId: agencyId };
-    if (status) {
-      where.status = status;
-    }
-
-    const bankCards = await this.prisma.bankCard.findMany({
-      where,
-      orderBy: [
-        { isDefault: 'desc' },
-        { createdAt: 'desc' },
-      ],
-    });
-
-    // Return cards with masked numbers (but we don't have original numbers)
-    // In real scenario, tokenized numbers are stored, so we show masked version
-    return bankCards.map(card => ({
-      ...card,
-      maskedCardNumber: '****-****-****-****', // در واقعیت از PSP می‌گیریم
-    }));
-  }
-
-  async findOne(agencyId: string, userId: string, cardId: string) {
-    await this.validateGeneralManagerAccess(agencyId, userId);
-
-    const bankCard = await this.prisma.bankCard.findFirst({
-      where: {
-        id: cardId,
-        agencyId: agencyId,
-      },
-    });
-
-    if (!bankCard) {
-      throw new NotFoundException('Bank card not found');
-    }
-
-    return {
-      ...bankCard,
-      maskedCardNumber: '****-****-****-****',
     };
   }
 
@@ -176,19 +160,18 @@ export class BankCardsService {
     });
 
     if (!bankCard) {
-      throw new NotFoundException('Bank card not found');
+      throw new NotFoundException('❌ کارت بانکی مورد نظر یافت نشد');
     }
 
-    // If changing default status
-    if (dto.isDefault === true) {
+    // اگر کاربر می‌خواهد این کارت را به عنوان پیش‌فرض تنظیم کند
+    if (dto.isDefault === true && !bankCard.isDefault) {
       await this.prisma.bankCard.updateMany({
         where: { agencyId: agencyId },
         data: { isDefault: false },
       });
     }
 
-    // If card number is being updated, tokenize new number
-    let updateData: any = {
+    const updateData: any = {
       bankName: dto.bankName,
       accountHolder: dto.accountHolder,
       sheba: dto.sheba,
@@ -205,7 +188,6 @@ export class BankCardsService {
       data: updateData,
     });
 
-    // Log activity
     await this.prisma.activityLog.create({
       data: {
         userId: userId,
@@ -231,10 +213,10 @@ export class BankCardsService {
     });
 
     if (!bankCard) {
-      throw new NotFoundException('Bank card not found');
+      throw new NotFoundException('❌ کارت بانکی مورد نظر یافت نشد');
     }
 
-    // Prevent deactivating the only active card
+    // جلوگیری از غیرفعال کردن تنها کارت فعال
     if (status === BankCardStatus.INACTIVE) {
       const activeCards = await this.prisma.bankCard.count({
         where: {
@@ -245,7 +227,7 @@ export class BankCardsService {
       });
 
       if (activeCards === 0) {
-        throw new BadRequestException('Cannot deactivate the only active bank card');
+        throw new BadRequestException('❌ نمی‌توانید تنها کارت فعال را غیرفعال کنید');
       }
     }
 
@@ -278,20 +260,20 @@ export class BankCardsService {
     });
 
     if (!bankCard) {
-      throw new NotFoundException('Bank card not found');
+      throw new NotFoundException('❌ کارت بانکی مورد نظر یافت نشد');
     }
 
     if (bankCard.status !== BankCardStatus.ACTIVE) {
-      throw new BadRequestException('Cannot set inactive card as default');
+      throw new BadRequestException('❌ نمی‌توانید کارت غیرفعال را به عنوان پیش‌فرض تنظیم کنید');
     }
 
-    // Remove default from all cards
+    // حذف پیش‌فرض از همه کارت‌ها
     await this.prisma.bankCard.updateMany({
       where: { agencyId: agencyId },
       data: { isDefault: false },
     });
 
-    // Set this card as default
+    // تنظیم این کارت به عنوان پیش‌فرض
     const updatedCard = await this.prisma.bankCard.update({
       where: { id: cardId },
       data: { isDefault: true },
@@ -319,27 +301,21 @@ export class BankCardsService {
         agencyId: agencyId,
       },
       include: {
-        invoices: {
-          take: 1,
-          select: { id: true },
-        },
-        payments: {
-          take: 1,
-          select: { id: true },
-        },
+        invoices: { take: 1, select: { id: true } },
+        payments: { take: 1, select: { id: true } },
       },
     });
 
     if (!bankCard) {
-      throw new NotFoundException('Bank card not found');
+      throw new NotFoundException('❌ کارت بانکی مورد نظر یافت نشد');
     }
 
-    // Check if card is used in any invoice or payment
+    // بررسی استفاده در فاکتور یا پرداخت
     if (bankCard.invoices.length > 0 || bankCard.payments.length > 0) {
-      throw new BadRequestException('Cannot delete card that has been used in invoices or payments. Deactivate instead.');
+      throw new BadRequestException('❌ این کارت در فاکتورها یا پرداخت‌ها استفاده شده است. فقط می‌توانید آن را غیرفعال کنید');
     }
 
-    // Prevent deleting the only active card
+    // جلوگیری از حذف تنها کارت فعال
     const activeCards = await this.prisma.bankCard.count({
       where: {
         agencyId: agencyId,
@@ -349,7 +325,7 @@ export class BankCardsService {
     });
 
     if (activeCards === 0 && bankCard.status === BankCardStatus.ACTIVE) {
-      throw new BadRequestException('Cannot delete the only active bank card');
+      throw new BadRequestException('❌ نمی‌توانید تنها کارت فعال را حذف کنید');
     }
 
     await this.prisma.bankCard.delete({ where: { id: cardId } });
@@ -364,11 +340,55 @@ export class BankCardsService {
       },
     });
 
-    return { message: 'Bank card deleted successfully' };
+    return { message: '✅ کارت بانکی با موفقیت حذف شد' };
+  }
+
+  // ============ خواندن کارت (مدیر کل و مدیر آژانس) ============
+
+  async findAll(agencyId: string, userId: string, status?: BankCardStatus) {
+    await this.validateBankCardReadAccess(agencyId, userId);
+
+    const where: any = { agencyId: agencyId };
+    if (status) {
+      where.status = status;
+    }
+
+    const bankCards = await this.prisma.bankCard.findMany({
+      where,
+      orderBy: [
+        { isDefault: 'desc' },
+        { createdAt: 'desc' },
+      ],
+    });
+
+    return bankCards.map(card => ({
+      ...card,
+      maskedCardNumber: '****-****-****-****',
+    }));
+  }
+
+  async findOne(agencyId: string, userId: string, cardId: string) {
+    await this.validateBankCardReadAccess(agencyId, userId);
+
+    const bankCard = await this.prisma.bankCard.findFirst({
+      where: {
+        id: cardId,
+        agencyId: agencyId,
+      },
+    });
+
+    if (!bankCard) {
+      throw new NotFoundException('❌ کارت بانکی مورد نظر یافت نشد');
+    }
+
+    return {
+      ...bankCard,
+      maskedCardNumber: '****-****-****-****',
+    };
   }
 
   async getDefaultCard(agencyId: string, userId: string) {
-    await this.validateGeneralManagerAccess(agencyId, userId);
+    await this.validateBankCardReadAccess(agencyId, userId);
 
     const defaultCard = await this.prisma.bankCard.findFirst({
       where: {
@@ -379,7 +399,6 @@ export class BankCardsService {
     });
 
     if (!defaultCard) {
-      // If no default card, get the first active card
       const firstActive = await this.prisma.bankCard.findFirst({
         where: {
           agencyId: agencyId,

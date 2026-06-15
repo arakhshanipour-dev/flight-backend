@@ -2,7 +2,7 @@ import { Injectable, NotFoundException, BadRequestException, ForbiddenException 
 import { PrismaService } from '../prisma/prisma.service';
 import { PlansService } from '../plans/plans.service';
 import { CreateTicketDto, UpdateTicketDto, RequestUnlockTicketDto, ProcessUnlockRequestDto, UnlockRequestAction } from './dto';
-import { TicketStatus, UserRole, UserStatus, AgencyStatus } from '@prisma/client';
+import { TicketStatus, UserRole, UserStatus, AgencyStatus, SupportTicketStatus } from '@prisma/client';
 
 @Injectable()
 export class TicketsService {
@@ -11,19 +11,17 @@ export class TicketsService {
     private plansService: PlansService,
   ) {}
 
-  // ============ Helper Methods ============
-
   private async validateAgencyAccess(agencyId: string, userId: string, requiredRole?: UserRole) {
     const agency = await this.prisma.agency.findUnique({
       where: { id: agencyId },
     });
 
     if (!agency) {
-      throw new NotFoundException('Agency not found');
+      throw new NotFoundException('آژانس مورد نظر یافت نشد');
     }
 
     if (agency.status !== AgencyStatus.ACTIVE && agency.status !== AgencyStatus.TRIAL) {
-      throw new ForbiddenException('Agency is not active');
+      throw new ForbiddenException('آژانس فعال نیست');
     }
 
     if (requiredRole) {
@@ -36,15 +34,15 @@ export class TicketsService {
       });
 
       if (!user) {
-        throw new ForbiddenException('Access denied');
+        throw new ForbiddenException('دسترسی denied');
       }
 
       if (requiredRole === UserRole.NORMAL_USER && user.role !== UserRole.NORMAL_USER) {
-        throw new ForbiddenException('Only normal users can perform this action');
+        throw new ForbiddenException('این action فقط برای کاربران عادی مجاز است');
       }
 
       if (requiredRole === UserRole.AGENCY_MANAGER && user.role !== UserRole.AGENCY_MANAGER && user.role !== UserRole.GENERAL_MANAGER) {
-        throw new ForbiddenException('Only agency managers or general managers can perform this action');
+        throw new ForbiddenException('این action فقط برای مدیران آژانس یا مدیر کل مجاز است');
       }
     }
 
@@ -65,25 +63,38 @@ export class TicketsService {
     });
 
     if (!ticket) {
-      throw new NotFoundException(`Ticket with ID ${ticketId} not found in this agency`);
+      throw new NotFoundException(`بلیط با شناسه ${ticketId} در این آژانس یافت نشد`);
     }
 
     if (checkOwnership && userId && ticket.userId !== userId) {
-      throw new ForbiddenException('You can only access your own tickets');
+      throw new ForbiddenException('شما فقط می‌توانید به بلیط‌های خود دسترسی داشته باشید');
     }
 
     return ticket;
   }
 
-  // ============ Normal User Methods ============
+  private checkRequiredFields(ticket: any, dto: UpdateTicketDto): string[] {
+    const missingFields: string[] = [];
+    if (!ticket.passengerName && !dto.passengerName) missingFields.push('نام مسافر');
+    if (!ticket.passengerPhone && !dto.passengerPhone) missingFields.push('شماره تماس');
+    if (!ticket.flightNumber && !dto.flightNumber) missingFields.push('شماره پرواز');
+    if (!ticket.origin && !dto.origin) missingFields.push('مبدأ');
+    if (!ticket.destination && !dto.destination) missingFields.push('مقصد');
+    if (!ticket.flightDate && !dto.flightDate) missingFields.push('تاریخ پرواز');
+    if (!ticket.seatClass && !dto.seatClass) missingFields.push('کلاس پرواز');
+    if ((!ticket.price || ticket.price === 0) && (!dto.price || dto.price === 0)) missingFields.push('قیمت');
+    return missingFields;
+  }
+
+  private sanitizeString(input: string): string {
+    if (!input) return input;
+    return input.trim().replace(/[<>]/g, '');
+  }
 
   async create(agencyId: string, userId: string, dto: CreateTicketDto) {
     await this.validateAgencyAccess(agencyId, userId, UserRole.NORMAL_USER);
-
-    // Check plan limit for tickets per month
     await this.plansService.checkTicketLimit(agencyId);
 
-    // Check if ticket number already exists in this agency
     const existingTicket = await this.prisma.ticket.findFirst({
       where: {
         agencyId: agencyId,
@@ -92,7 +103,7 @@ export class TicketsService {
     });
 
     if (existingTicket) {
-      throw new BadRequestException(`Ticket number ${dto.ticketNumber} already exists in this agency`);
+      throw new BadRequestException(`❌ شماره بلیط ${dto.ticketNumber} قبلاً در این آژانس ثبت شده است`);
     }
 
     const ticket = await this.prisma.ticket.create({
@@ -237,7 +248,7 @@ export class TicketsService {
     });
 
     if (!ticket) {
-      throw new NotFoundException('Ticket not found');
+      throw new NotFoundException('بلیط مورد نظر یافت نشد');
     }
 
     return ticket;
@@ -247,28 +258,37 @@ export class TicketsService {
     const ticket = await this.getTicketWithAccess(ticketId, agencyId, userId, userRole === UserRole.NORMAL_USER);
 
     if (ticket.status === TicketStatus.INVOICED) {
-      throw new BadRequestException('Cannot edit a ticket that has been invoiced');
+      throw new BadRequestException('❌ این بلیط قبلاً فاکتور شده است و قابل ویرایش نیست');
     }
 
     if (ticket.status === TicketStatus.FINALIZED && userRole === UserRole.NORMAL_USER) {
-      throw new BadRequestException('Cannot edit a finalized ticket. Please request unlock from agency manager.');
+      throw new BadRequestException('❌ این بلیط نهایی شده است. برای ویرایش، ابتدا درخواست باز کردن بلیط را ثبت کنید');
     }
 
-    let newStatus = dto.status;
-    if (dto.status === TicketStatus.FINALIZED && userRole === UserRole.NORMAL_USER) {
-      if (ticket.status !== TicketStatus.COMPLETED) {
-        throw new BadRequestException('Ticket must be completed before finalization');
-      }
-      newStatus = TicketStatus.FINALIZED;
-    }
+    let newStatus = dto.status || ticket.status;
 
-    if (dto.status === TicketStatus.COMPLETED) {
-      const requiredFields = ['passengerName', 'passengerPhone', 'flightNumber', 'origin', 'destination', 'flightDate', 'seatClass', 'price'];
-      for (const field of requiredFields) {
-        const value = (dto as any)[field] ?? (ticket as any)[field];
-        if (!value) {
-          throw new BadRequestException(`Field ${field} is required to complete the ticket`);
+    if (userRole === UserRole.NORMAL_USER) {
+      if (dto.status === TicketStatus.COMPLETED) {
+        const missingFields = this.checkRequiredFields(ticket, dto);
+        if (missingFields.length > 0) {
+          throw new BadRequestException(`⚠️ برای تکمیل بلیط، فیلدهای زیر باید پر شوند:\n${missingFields.join('، ')}`);
         }
+        newStatus = TicketStatus.COMPLETED;
+      } 
+      else if (dto.status === TicketStatus.FINALIZED) {
+        if (ticket.status !== TicketStatus.COMPLETED) {
+          throw new BadRequestException('⚠️ بلیط ابتدا باید تکمیل شود (وضعیت COMPLETED)، سپس می‌توانید آن را نهایی کنید');
+        }
+        newStatus = TicketStatus.FINALIZED;
+      }
+      else if (dto.status && dto.status !== ticket.status) {
+        throw new BadRequestException('❌ شما فقط می‌توانید وضعیت بلیط را به "تکمیل شده" یا "نهایی شده" تغییر دهید');
+      }
+    }
+
+    if (userRole !== UserRole.NORMAL_USER && dto.status === TicketStatus.FINALIZED) {
+      if (ticket.status !== TicketStatus.COMPLETED && ticket.status !== TicketStatus.FINALIZED) {
+        throw new BadRequestException('⚠️ بلیط باید در وضعیت COMPLETED باشد تا بتوان آن را نهایی کرد');
       }
     }
 
@@ -317,11 +337,11 @@ export class TicketsService {
     const ticket = await this.getTicketWithAccess(ticketId, agencyId, userId, userRole === UserRole.NORMAL_USER);
 
     if (ticket.status === TicketStatus.INVOICED) {
-      throw new BadRequestException('Cannot delete a ticket that has been invoiced');
+      throw new BadRequestException('❌ این بلیط قبلاً فاکتور شده است و قابل حذف نیست');
     }
 
     if (ticket.status === TicketStatus.FINALIZED) {
-      throw new BadRequestException('Cannot delete a finalized ticket');
+      throw new BadRequestException('❌ این بلیط نهایی شده است و قابل حذف نیست');
     }
 
     await this.prisma.ticket.delete({ where: { id: ticketId } });
@@ -336,56 +356,71 @@ export class TicketsService {
       },
     });
 
-    return { message: 'Ticket deleted successfully' };
+    return { message: '✅ بلیط با موفقیت حذف شد' };
   }
 
-  // ============ Unlock Request Methods ============
+  // ============ درخواست باز کردن بلیط (اصلاح شده - پشتیبانی از زنجیره ارجاع) ============
 
   async requestUnlock(agencyId: string, userId: string, ticketId: string, dto: RequestUnlockTicketDto) {
     await this.validateAgencyAccess(agencyId, userId, UserRole.NORMAL_USER);
     const ticket = await this.getTicketWithAccess(ticketId, agencyId, userId, true);
 
     if (ticket.status !== TicketStatus.FINALIZED && ticket.status !== TicketStatus.INVOICED) {
-      throw new BadRequestException('Only finalized or invoiced tickets need unlock request');
+      throw new BadRequestException('⚠️ فقط بلیط‌های نهایی شده یا فاکتور شده نیاز به درخواست باز کردن دارند');
     }
 
+    // بررسی درخواست قبلی باز (در هر وضعیتی غیر از RESOLVED یا CLOSED)
     const existingRequest = await this.prisma.supportTicket.findFirst({
       where: {
         agencyId: agencyId,
         senderType: 'AGENCY',
-        title: `درخواست باز کردن بلیط ${ticket.ticketNumber}`,
-        status: 'OPEN',
+        title: { startsWith: `درخواست باز کردن بلیط ${ticket.ticketNumber}` },
+        status: { in: [SupportTicketStatus.OPEN, SupportTicketStatus.IN_PROGRESS, SupportTicketStatus.FORWARDED] },
       },
     });
 
     if (existingRequest) {
-      throw new BadRequestException('You already have a pending unlock request for this ticket');
+      throw new BadRequestException('⚠️ شما قبلاً یک درخواست باز کردن برای این بلیط ثبت کرده‌اید که همچنان باز است');
     }
 
     const sanitizedReason = this.sanitizeString(dto.reason);
+    
+    // تعیین مرجع مقصد بر اساس نقش کاربر
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    let forwardedTo = 'AGENCY_MANAGER';
+    
+    if (user?.role === UserRole.AGENCY_MANAGER) {
+      forwardedTo = 'GENERAL_MANAGER';
+    } else if (user?.role === UserRole.GENERAL_MANAGER) {
+      forwardedTo = 'SUPPORT';
+    }
+
     const unlockTicket = await this.prisma.supportTicket.create({
       data: {
         ticketNumber: `UNLOCK-${Date.now()}`,
         title: `درخواست باز کردن بلیط ${ticket.ticketNumber}`,
-        description: `دلیل درخواست: ${sanitizedReason}\n\nشماره بلیط: ${ticket.ticketNumber}\nمسافر: ${ticket.passengerName}\nپرواز: ${ticket.flightNumber}`,
-        status: 'OPEN',
+        description: `دلیل درخواست: ${sanitizedReason}\n\nشماره بلیط: ${ticket.ticketNumber}\nمسافر: ${ticket.passengerName}\nپرواز: ${ticket.flightNumber}\nوضعیت فعلی: ${ticket.status}`,
+        status: SupportTicketStatus.OPEN,
         priority: 'MEDIUM',
         senderType: 'AGENCY',
         agencyId: agencyId,
         userId: userId,
-        forwardedTo: 'AGENCY_MANAGER',
+        forwardedTo: forwardedTo,
       },
     });
 
-    await this.prisma.penalty.create({
-      data: {
-        userId: userId,
-        agencyId: agencyId,
-        points: 1,
-        reason: `UNLOCK_FROZEN_TICKET - Ticket: ${ticket.ticketNumber}`,
-        ticketId: ticketId,
-      },
-    });
+    // ثبت امتیاز منفی فقط برای کاربر عادی
+    if (user?.role === UserRole.NORMAL_USER) {
+      await this.prisma.penalty.create({
+        data: {
+          userId: userId,
+          agencyId: agencyId,
+          points: 1,
+          reason: `درخواست باز کردن بلیط ${ticket.ticketNumber}`,
+          ticketId: ticketId,
+        },
+      });
+    }
 
     await this.prisma.activityLog.create({
       data: {
@@ -394,28 +429,38 @@ export class TicketsService {
         action: 'REQUEST_UNLOCK_TICKET',
         entityType: 'Ticket',
         entityId: ticketId,
-        newData: { reason: sanitizedReason },
+        newData: { reason: sanitizedReason, forwardedTo },
       },
     });
 
+    const targetLabel = forwardedTo === 'AGENCY_MANAGER' ? 'مدیر آژانس' : forwardedTo === 'GENERAL_MANAGER' ? 'مدیر کل' : 'پشتیبانی';
+    
     return {
-      message: 'Unlock request submitted successfully. A penalty point has been recorded.',
+      message: `✅ درخواست باز کردن بلیط با موفقیت ثبت شد. درخواست به ${targetLabel} ارسال شد.${user?.role === UserRole.NORMAL_USER ? ' یک امتیاز منفی برای شما ثبت گردید.' : ''}`,
       supportTicket: unlockTicket,
     };
   }
 
+  // ============ دریافت درخواست‌های باز کردن (بر اساس نقش) ============
+
   async getUnlockRequests(agencyId: string, userId: string, userRole: UserRole) {
     await this.validateAgencyAccess(agencyId, userId);
 
-    if (userRole !== UserRole.AGENCY_MANAGER && userRole !== UserRole.GENERAL_MANAGER) {
-      throw new ForbiddenException('Only agency managers can view unlock requests');
+    let forwardedTo: string | undefined;
+    
+    if (userRole === UserRole.AGENCY_MANAGER) {
+      forwardedTo = 'AGENCY_MANAGER';
+    } else if (userRole === UserRole.GENERAL_MANAGER) {
+      forwardedTo = 'GENERAL_MANAGER';
+    } else {
+      throw new ForbiddenException('❌ فقط مدیران آژانس یا مدیر کل می‌توانند درخواست‌های باز کردن را مشاهده کنند');
     }
 
     const requests = await this.prisma.supportTicket.findMany({
       where: {
         agencyId: agencyId,
-        forwardedTo: 'AGENCY_MANAGER',
-        status: 'OPEN',
+        forwardedTo: forwardedTo,
+        status: SupportTicketStatus.OPEN,
         title: { startsWith: 'درخواست باز کردن بلیط' },
       },
       include: {
@@ -434,6 +479,8 @@ export class TicketsService {
     return requests;
   }
 
+  // ============ پردازش درخواست باز کردن (تأیید/رد) ============
+
   async processUnlockRequest(agencyId: string, managerId: string, requestId: string, dto: ProcessUnlockRequestDto) {
     await this.validateAgencyAccess(agencyId, managerId);
     
@@ -441,17 +488,29 @@ export class TicketsService {
       where: {
         id: requestId,
         agencyId: agencyId,
-        forwardedTo: 'AGENCY_MANAGER',
+        status: SupportTicketStatus.OPEN,
+        title: { startsWith: 'درخواست باز کردن بلیط' },
       },
     });
 
     if (!request) {
-      throw new NotFoundException('Unlock request not found');
+      throw new NotFoundException('درخواست باز کردن بلیط یافت نشد');
+    }
+
+    // بررسی دسترسی (مدیر آژانس یا مدیر کل)
+    const user = await this.prisma.user.findUnique({ where: { id: managerId } });
+    
+    if (user?.role === UserRole.AGENCY_MANAGER && request.forwardedTo !== 'AGENCY_MANAGER') {
+      throw new ForbiddenException('شما مجاز به پردازش این درخواست نیستید');
+    }
+    
+    if (user?.role === UserRole.GENERAL_MANAGER && request.forwardedTo !== 'GENERAL_MANAGER') {
+      throw new ForbiddenException('شما مجاز به پردازش این درخواست نیستید');
     }
 
     const ticketNumberMatch = request.title.match(/بلیط\s+(\S+)/);
     if (!ticketNumberMatch) {
-      throw new BadRequestException('Could not find ticket number in request');
+      throw new BadRequestException('شماره بلیط در درخواست یافت نشد');
     }
 
     const ticketNumber = ticketNumberMatch[1];
@@ -463,10 +522,11 @@ export class TicketsService {
     });
 
     if (!ticket) {
-      throw new NotFoundException('Associated ticket not found');
+      throw new NotFoundException('بلیط مرتبط با این درخواست یافت نشد');
     }
 
     if (dto.action === UnlockRequestAction.APPROVE) {
+      // باز کردن بلیط
       await this.prisma.ticket.update({
         where: { id: ticket.id },
         data: {
@@ -478,7 +538,7 @@ export class TicketsService {
       await this.prisma.supportTicket.update({
         where: { id: requestId },
         data: {
-          status: 'RESOLVED',
+          status: SupportTicketStatus.RESOLVED,
           resolvedAt: new Date(),
         },
       });
@@ -490,15 +550,18 @@ export class TicketsService {
           action: 'APPROVE_UNLOCK_TICKET',
           entityType: 'Ticket',
           entityId: ticket.id,
+          newData: { approvedBy: user?.role },
         },
       });
 
-      return { message: 'Ticket unlocked successfully. User can now edit the ticket.' };
-    } else {
+      return { message: '✅ بلیط با موفقیت باز شد. کاربر می‌تواند بلیط را ویرایش کند.' };
+    } 
+    else {
+      // رد درخواست
       await this.prisma.supportTicket.update({
         where: { id: requestId },
         data: {
-          status: 'RESOLVED',
+          status: SupportTicketStatus.RESOLVED,
           resolvedAt: new Date(),
         },
       });
@@ -510,15 +573,15 @@ export class TicketsService {
           action: 'REJECT_UNLOCK_TICKET',
           entityType: 'Ticket',
           entityId: ticket.id,
-          newData: { notes: dto.notes ? this.sanitizeString(dto.notes) : null },
+          newData: { notes: dto.notes ? this.sanitizeString(dto.notes) : null, rejectedBy: user?.role },
         },
       });
 
-      return { message: 'Unlock request rejected. Ticket remains locked.' };
+      return { message: '❌ درخواست باز کردن بلیط رد شد. بلیط همچنان قفل است.' };
     }
   }
 
-  // ============ General Manager Methods ============
+  // ============ باز کردن اجباری توسط مدیر کل ============
 
   async forceUnlockTicket(agencyId: string, managerId: string, ticketId: string) {
     await this.validateAgencyAccess(agencyId, managerId);
@@ -528,13 +591,13 @@ export class TicketsService {
     });
 
     if (user?.role !== UserRole.GENERAL_MANAGER) {
-      throw new ForbiddenException('Only General Manager can force unlock tickets');
+      throw new ForbiddenException('❌ فقط مدیر کل می‌تواند بلیط را به اجبار باز کند');
     }
 
     const ticket = await this.getTicketWithAccess(ticketId, agencyId, undefined, false);
 
     if (ticket.status !== TicketStatus.FINALIZED && ticket.status !== TicketStatus.INVOICED) {
-      throw new BadRequestException('Ticket is not in a locked state');
+      throw new BadRequestException('⚠️ بلیط در وضعیت قفل شده نیست');
     }
 
     const updatedTicket = await this.prisma.ticket.update({
@@ -556,15 +619,8 @@ export class TicketsService {
     });
 
     return {
-      message: 'Ticket forcefully unlocked by General Manager',
+      message: '🔓 بلیط به اجبار توسط مدیر کل باز شد',
       ticket: updatedTicket,
     };
-  }
-
-  // ============ Security Helper ============
-
-  private sanitizeString(input: string): string {
-    if (!input) return input;
-    return input.trim().replace(/[<>]/g, '');
   }
 }

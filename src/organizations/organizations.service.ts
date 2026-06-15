@@ -576,4 +576,32 @@ export class OrganizationsService {
 
     return agenciesWithInvoices.map(item => item.agency);
   }
+
+  async searchOrganizations(q: string, limit: number = 10) {
+  if (!q || q.length < 2) {
+    return [];
+  }
+  
+  const organizations = await this.prisma.organization.findMany({
+    where: {
+      hasPanel: true,
+      OR: [
+        { name: { contains: q, mode: 'insensitive' } },
+        { nationalId: { contains: q, mode: 'insensitive' } },
+        { email: { contains: q, mode: 'insensitive' } },
+      ],
+    },
+    select: {
+      id: true,
+      name: true,
+      nationalId: true,
+      email: true,
+      phone: true,
+    },
+    take: limit,
+    orderBy: { name: 'asc' },
+  });
+  
+  return organizations;
+}
 }

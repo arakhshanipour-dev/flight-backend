@@ -21,32 +21,46 @@ export class AccountingService {
 
   // ============ Helper Methods ============
 
-  private async validateAgencyAccess(agencyId: string, userId: string, userRole: UserRole) {
-    if (userRole === UserRole.SUPER_ADMIN) {
-      return true;
-    }
+// ============ در فایل accounting.service.ts ============
 
-    const user = await this.prisma.user.findFirst({
-      where: {
-        id: userId,
-        agencyId: agencyId,
-        status: UserStatus.ACTIVE,
-      },
-    });
-
-    if (!user) {
-      throw new ForbiddenException('Access denied to this agency');
-    }
-
-    // General Manager can view all, Agency Manager has limited access
-    if (userRole === UserRole.AGENCY_MANAGER) {
-      // Agency Manager can only see limited stats (no sensitive financial details)
-      return { limited: true };
-    }
-
+private async validateAgencyAccess(agencyId: string, userId: string, userRole: UserRole) {
+  // SUPER_ADMIN دسترسی کامل دارد
+  if (userRole === UserRole.SUPER_ADMIN) {
     return true;
   }
 
+  // بررسی وجود کاربر در آژانس
+  const user = await this.prisma.user.findFirst({
+    where: {
+      id: userId,
+      agencyId: agencyId,
+      status: UserStatus.ACTIVE,
+    },
+  });
+
+  if (!user) {
+    throw new ForbiddenException('Access denied to this agency');
+  }
+
+  // GENERAL_MANAGER دسترسی کامل دارد
+  if (userRole === UserRole.GENERAL_MANAGER) {
+    return true;
+  }
+
+  // AGENCY_MANAGER دسترسی محدود دارد (بدون اطلاعات مالی حساس)
+  if (userRole === UserRole.AGENCY_MANAGER) {
+    return { limited: true };
+  }
+
+  // ✅ اضافه کردن شرط برای NORMAL_USER
+  if (userRole === UserRole.NORMAL_USER) {
+    // کاربر عادی فقط اطلاعات پایه (بلیط‌های خودش و اطلاعات عمومی) را می‌بیند
+    return { limited: true, normalUser: true };
+  }
+
+  // Fallback
+  return { limited: true };
+}
   private getDateRange(period: ReportPeriod, startDate?: string, endDate?: string) {
     const now = new Date();
     let start: Date;
@@ -91,125 +105,203 @@ export class AccountingService {
   // ============ Agency Dashboard ============
 
   async getAgencyDashboard(agencyId: string, userId: string, userRole: UserRole): Promise<AgencyDashboardStatsDto> {
-    const access = await this.validateAgencyAccess(agencyId, userId, userRole);
-    
-    const agency = await this.prisma.agency.findUnique({
-      where: { id: agencyId },
-      include: {
-        agencyPlans: {
-          where: { isActive: true },
-          include: { plan: true },
-          take: 1,
-        },
+  const access = await this.validateAgencyAccess(agencyId, userId, userRole);
+  
+  const agency = await this.prisma.agency.findUnique({
+    where: { id: agencyId },
+    include: {
+      agencyPlans: {
+        where: { isActive: true },
+        include: { plan: true },
+        take: 1,
       },
+    },
+  });
+
+  if (!agency) {
+    throw new BadRequestException('Agency not found');
+  }
+
+  // ============ User stats ============
+  let users;
+  if (userRole === UserRole.NORMAL_USER) {
+    const currentUser = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true, status: true },
     });
-
-    if (!agency) {
-      throw new BadRequestException('Agency not found');
-    }
-
-    // User stats
-    const users = await this.prisma.user.groupBy({
+    users = currentUser ? [{ role: currentUser.role, status: currentUser.status, _count: 1 }] : [];
+  } else {
+    users = await this.prisma.user.groupBy({
       by: ['role', 'status'],
       where: { agencyId: agencyId },
       _count: true,
     });
+  }
 
-    const userStats = {
-      total: users.reduce((sum, u) => sum + u._count, 0),
-      active: users.filter(u => u.status === 'ACTIVE').reduce((sum, u) => sum + u._count, 0),
-      inactive: users.filter(u => u.status === 'INACTIVE').reduce((sum, u) => sum + u._count, 0),
-      byRole: users.reduce((acc, u) => {
-        acc[u.role] = (acc[u.role] || 0) + u._count;
-        return acc;
-      }, {} as Record<string, number>),
-    };
+  const userStats = {
+    total: users.reduce((sum, u) => sum + u._count, 0),
+    active: users.filter(u => u.status === 'ACTIVE').reduce((sum, u) => sum + u._count, 0),
+    inactive: users.filter(u => u.status === 'INACTIVE').reduce((sum, u) => sum + u._count, 0),
+    byRole: users.reduce((acc, u) => {
+      acc[u.role] = (acc[u.role] || 0) + u._count;
+      return acc;
+    }, {} as Record<string, number>),
+  };
 
-    // Ticket stats
-    const tickets = await this.prisma.ticket.groupBy({
+  // ============ Ticket stats ============
+  let tickets;
+  if (userRole === UserRole.NORMAL_USER) {
+    tickets = await this.prisma.ticket.groupBy({
+      by: ['status'],
+      where: { 
+        agencyId: agencyId,
+        userId: userId
+      },
+      _count: true,
+    });
+  } else {
+    tickets = await this.prisma.ticket.groupBy({
       by: ['status'],
       where: { agencyId: agencyId },
       _count: true,
     });
+  }
 
-    const ticketStats = {
-      total: tickets.reduce((sum, t) => sum + t._count, 0),
-      draft: tickets.find(t => t.status === TicketStatus.DRAFT)?._count || 0,
-      completed: tickets.find(t => t.status === TicketStatus.COMPLETED)?._count || 0,
-      finalized: tickets.find(t => t.status === TicketStatus.FINALIZED)?._count || 0,
-      invoiced: tickets.find(t => t.status === TicketStatus.INVOICED)?._count || 0,
-    };
+  const ticketStats = {
+    total: tickets.reduce((sum, t) => sum + t._count, 0),
+    draft: tickets.find(t => t.status === TicketStatus.DRAFT)?._count || 0,
+    completed: tickets.find(t => t.status === TicketStatus.COMPLETED)?._count || 0,
+    finalized: tickets.find(t => t.status === TicketStatus.FINALIZED)?._count || 0,
+    invoiced: tickets.find(t => t.status === TicketStatus.INVOICED)?._count || 0,
+  };
 
-    // Invoice stats
-    const invoices = await this.prisma.invoice.groupBy({
+  // ============ Invoice stats ============
+  let invoices;
+  if (userRole === UserRole.NORMAL_USER) {
+    const userTickets = await this.prisma.ticket.findMany({
+      where: { agencyId: agencyId, userId: userId },
+      select: { invoiceId: true },
+    });
+    
+    const invoiceIds = userTickets
+      .map(t => t.invoiceId)
+      .filter((id): id is string => id !== null);
+    
+    if (invoiceIds.length > 0) {
+      invoices = await this.prisma.invoice.groupBy({
+        by: ['status'],
+        where: { 
+          agencyId: agencyId,
+          id: { in: invoiceIds }
+        },
+        _count: true,
+        _sum: { total: true },
+      });
+    } else {
+      invoices = [];
+    }
+  } else {
+    invoices = await this.prisma.invoice.groupBy({
       by: ['status'],
       where: { agencyId: agencyId },
       _count: true,
       _sum: { total: true },
     });
+  }
 
-    const invoiceStats = {
-      total: invoices.reduce((sum, i) => sum + i._count, 0),
-      unpaid: invoices.find(i => i.status === InvoiceStatus.UNPAID)?._count || 0,
-      paid: invoices.find(i => i.status === InvoiceStatus.PAID)?._count || 0,
-      cancelled: invoices.find(i => i.status === InvoiceStatus.CANCELLED)?._count || 0,
-      totalAmount: invoices.reduce((sum, i) => sum + (i._sum.total || 0), 0),
-      paidAmount: invoices.find(i => i.status === InvoiceStatus.PAID)?._sum.total || 0,
-      unpaidAmount: invoices.find(i => i.status === InvoiceStatus.UNPAID)?._sum.total || 0,
-    };
+  const invoiceStats = {
+    total: invoices.reduce((sum, i) => sum + i._count, 0),
+    unpaid: invoices.find(i => i.status === InvoiceStatus.UNPAID)?._count || 0,
+    paid: invoices.find(i => i.status === InvoiceStatus.PAID)?._count || 0,
+    cancelled: invoices.find(i => i.status === InvoiceStatus.CANCELLED)?._count || 0,
+    totalAmount: invoices.reduce((sum, i) => sum + (i._sum.total || 0), 0),
+    paidAmount: invoices.find(i => i.status === InvoiceStatus.PAID)?._sum.total || 0,
+    unpaidAmount: invoices.find(i => i.status === InvoiceStatus.UNPAID)?._sum.total || 0,
+  };
 
-    // Payment stats
-    const payments = await this.prisma.payment.groupBy({
+  // ============ Payment stats ============
+  let payments;
+  if (userRole === UserRole.NORMAL_USER) {
+    const userTickets = await this.prisma.ticket.findMany({
+      where: { agencyId: agencyId, userId: userId },
+      select: { invoiceId: true },
+    });
+    
+    const invoiceIds = userTickets
+      .map(t => t.invoiceId)
+      .filter((id): id is string => id !== null);
+    
+    if (invoiceIds.length > 0) {
+      payments = await this.prisma.payment.groupBy({
+        by: ['status'],
+        where: { 
+          agencyId: agencyId,
+          invoiceId: { in: invoiceIds }
+        },
+        _count: true,
+        _sum: { amount: true },
+      });
+    } else {
+      payments = [];
+    }
+  } else {
+    payments = await this.prisma.payment.groupBy({
       by: ['status'],
       where: { agencyId: agencyId },
       _count: true,
       _sum: { amount: true },
     });
+  }
 
-    const paymentStats = {
-      total: payments.reduce((sum, p) => sum + p._count, 0),
-      completed: payments.find(p => p.status === PaymentStatus.COMPLETED)?._count || 0,
-      failed: payments.find(p => p.status === PaymentStatus.FAILED)?._count || 0,
-      totalAmount: payments.find(p => p.status === PaymentStatus.COMPLETED)?._sum.amount || 0,
-    };
+  const paymentStats = {
+    total: payments.reduce((sum, p) => sum + p._count, 0),
+    completed: payments.find(p => p.status === PaymentStatus.COMPLETED)?._count || 0,
+    failed: payments.find(p => p.status === PaymentStatus.FAILED)?._count || 0,
+    totalAmount: payments.find(p => p.status === PaymentStatus.COMPLETED)?._sum.amount || 0,
+  };
 
-    // Bank cards count
-    const bankCardsCount = await this.prisma.bankCard.count({
-      where: { agencyId: agencyId, status: 'ACTIVE' },
-    });
+  // Bank cards count
+  const bankCardsCount = (userRole === UserRole.GENERAL_MANAGER) 
+    ? await this.prisma.bankCard.count({
+        where: { agencyId: agencyId, status: 'ACTIVE' },
+      })
+    : 0;
 
-    // Monthly trends (last 12 months)
-    const monthlyTrends = await this.getMonthlyTrends(agencyId);
+  // Monthly trends
+  let monthlyTrends: MonthlyTrendDto[] = [];
+  if (userRole !== UserRole.NORMAL_USER) {
+    monthlyTrends = await this.getMonthlyTrends(agencyId);
+  }
 
-    // For Agency Manager, hide sensitive financial data
-    const limitedAccess = (access as any)?.limited === true;
-    
-    return {
-      agencyId: agency.id,
-      agencyName: agency.name,
-      agencyStatus: agency.status,
-      currentPlan: agency.agencyPlans[0]?.plan.name || 'No Plan',
-      trialExpiresAt: agency.trialExpiresAt,
-      users: userStats,
-      tickets: ticketStats,
-      invoices: limitedAccess ? {
-        total: invoiceStats.total,
-        unpaid: invoiceStats.unpaid,
-        paid: invoiceStats.paid,
-        cancelled: invoiceStats.cancelled,
-        totalAmount: 0, // Hide from Agency Manager
-        paidAmount: 0,
-        unpaidAmount: 0,
-      } : invoiceStats,
-      payments: limitedAccess ? {
-        total: paymentStats.total,
-        completed: paymentStats.completed,
-        failed: paymentStats.failed,
-        totalAmount: 0, // Hide from Agency Manager
-      } : paymentStats,
-      bankCardsCount,
-      monthlyTrends: limitedAccess ? monthlyTrends.map(t => ({ ...t, revenue: 0 })) : monthlyTrends,
-    };
+  const limitedAccess = (access as any)?.limited === true;
+  const isNormalUser = userRole === UserRole.NORMAL_USER;
+  
+  return {
+    agencyId: agency.id,
+    agencyName: agency.name,
+    agencyStatus: agency.status,
+    currentPlan: agency.agencyPlans[0]?.plan.name || 'No Plan',
+    trialExpiresAt: agency.trialExpiresAt,
+    users: userStats,
+    tickets: ticketStats,
+    invoices: (limitedAccess || isNormalUser) ? {
+      total: invoiceStats.total,
+      unpaid: invoiceStats.unpaid,
+      paid: invoiceStats.paid,
+      cancelled: invoiceStats.cancelled,
+      totalAmount: 0,
+      paidAmount: 0,
+      unpaidAmount: 0,
+    } : invoiceStats,
+    payments: (limitedAccess || isNormalUser) ? {
+      total: paymentStats.total,
+      completed: paymentStats.completed,
+      failed: paymentStats.failed,
+      totalAmount: 0,
+    } : paymentStats,
+    bankCardsCount,
+    monthlyTrends: (limitedAccess || isNormalUser) ? monthlyTrends.map(t => ({ ...t, revenue: 0 })) : monthlyTrends,
+  };
   }
 
   private async getMonthlyTrends(agencyId: string): Promise<MonthlyTrendDto[]> {

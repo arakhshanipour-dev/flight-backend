@@ -46,10 +46,11 @@ export class AgenciesController {
 
   @Post()
   @ApiOperation({ summary: 'Create a new agency (Support only)' })
-  @ApiResponse({ status: 201, description: 'Agency created successfully', type: AgencyResponseDto })
-  @ApiResponse({ status: 409, description: 'Agency with this name, email, or registration number already exists' })
-  async create(@Body() dto: CreateAgencyDto) {
-    return this.agenciesService.create(dto);
+  async create(
+    @Body() dto: CreateAgencyDto,
+    @CurrentUser('id') adminId: string,  // اضافه کردن adminId
+  ) {
+    return this.agenciesService.create(dto, adminId);
   }
 
   @Get()

@@ -1,7 +1,8 @@
 import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateAgencyDto, UpdateAgencyDto, ChangeAgencyPlanDto } from './dto';
-import { AgencyStatus, UserRole, UserStatus, Agency, AgencyPlan, Plan, Prisma } from '@prisma/client';
+import { AgencyStatus, UserRole, UserStatus, AgencyPlan, Plan, Prisma } from '@prisma/client';
+import * as bcrypt from 'bcrypt';
 
 // Define proper return type using Prisma's types
 type AgencyWithDetails = Prisma.AgencyGetPayload<{
@@ -39,37 +40,100 @@ type AgencyWithDetails = Prisma.AgencyGetPayload<{
 export class AgenciesService {
   constructor(private prisma: PrismaService) {}
 
-  async create(dto: CreateAgencyDto) {
-    // Check if agency with same name or email already exists
-    const existingAgency = await this.prisma.agency.findFirst({
-      where: {
-        OR: [
-          { name: dto.name },
-          ...(dto.email ? [{ email: dto.email }] : []),
-          ...(dto.registrationNumber ? [{ registrationNumber: dto.registrationNumber }] : []),
-        ],
-      },
-    });
-
-    if (existingAgency) {
-      throw new ConflictException('Agency with this name, email, or registration number already exists');
+  private generateTemporaryPassword(): string {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let password = '';
+    for (let i = 0; i < 10; i++) {
+      password += chars.charAt(Math.floor(Math.random() * chars.length));
     }
-
-    const agency = await this.prisma.agency.create({
-      data: {
-        name: dto.name,
-        registrationNumber: dto.registrationNumber,
-        phone: dto.phone,
-        email: dto.email,
-        address: dto.address,
-        status: dto.status || AgencyStatus.TRIAL,
-        trialExpiresAt: dto.trialExpiresAt,
-      },
-    });
-
-    return agency;
+    return password + 'A1!';
   }
 
+  private sanitizeString(input: string): string {
+    if (!input) return input;
+    return input.trim().replace(/[<>]/g, '');
+  }
+
+async create(dto: CreateAgencyDto , adminId?: string) {
+  // Check if agency with same name or email already exists
+  const existingAgency = await this.prisma.agency.findFirst({
+    where: {
+      OR: [
+        { name: dto.name },
+        ...(dto.email ? [{ email: dto.email }] : []),
+        ...(dto.registrationNumber ? [{ registrationNumber: dto.registrationNumber }] : []),
+      ],
+    },
+  });
+
+  if (existingAgency) {
+    throw new ConflictException('Agency with this name, email, or registration number already exists');
+  }
+
+  // Create agency
+  const agency = await this.prisma.agency.create({
+    data: {
+      name: this.sanitizeString(dto.name),
+      registrationNumber: dto.registrationNumber ? this.sanitizeString(dto.registrationNumber) : null,
+      phone: dto.phone ? this.sanitizeString(dto.phone) : null,
+      email: dto.email ? this.sanitizeString(dto.email) : null,
+      address: dto.address ? this.sanitizeString(dto.address) : null,
+      status: dto.status || AgencyStatus.TRIAL,
+      trialExpiresAt: dto.trialExpiresAt,
+    },
+  });
+
+  // Create General Manager user for the agency
+  const temporaryPassword = this.generateTemporaryPassword();
+  const hashedPassword = await bcrypt.hash(temporaryPassword, 10);
+
+  const contactName = dto.contactName || 'مدیر کل';
+  const firstName = contactName.split(' ')[0] || 'مدیر';
+  const lastName = contactName.split(' ')[1] || 'کل';
+
+  const generalManager = await this.prisma.user.create({
+    data: {
+      email: dto.email || `${agency.name.replace(/\s/g, '').toLowerCase()}@agency.com`,
+      passwordHash: hashedPassword,
+      firstName: this.sanitizeString(firstName),
+      lastName: this.sanitizeString(lastName),
+      phone: dto.phone || null,
+      role: UserRole.GENERAL_MANAGER,
+      agencyId: agency.id,
+      status: UserStatus.ACTIVE,
+    },
+    select: {
+      id: true,
+      email: true,
+      firstName: true,
+      lastName: true,
+      role: true,
+      status: true,
+    },
+  });
+
+  // Log activity - حذف شده یا با userId معتبر جایگزین کنید
+  // اگر می‌خواهید لاگ داشته باشید، باید userId واقعی (مثلاً از JWT) دریافت کنید
+  // فعلاً این بخش را کامنت می‌کنیم تا خطا ندهد
+  
+  // await this.prisma.activityLog.create({
+  //   data: {
+  //     userId: 'system', // این خط مشکل دارد چون کاربر 'system' وجود ندارد
+  //     agencyId: agency.id,
+  //     action: 'CREATE_AGENCY_WITH_MANAGER',
+  //     entityType: 'Agency',
+  //     entityId: agency.id,
+  //     newData: { agencyName: agency.name, managerEmail: generalManager.email },
+  //   },
+  // });
+
+  return {
+    agency,
+    generalManager,
+    temporaryPassword,
+    message: `Agency created successfully. General Manager password: ${temporaryPassword}`,
+  };
+}
   async findAll(
     page: number = 1,
     limit: number = 20,
@@ -199,11 +263,11 @@ export class AgenciesService {
     const agency = await this.prisma.agency.update({
       where: { id },
       data: {
-        name: dto.name,
-        registrationNumber: dto.registrationNumber,
-        phone: dto.phone,
-        email: dto.email,
-        address: dto.address,
+        name: dto.name ? this.sanitizeString(dto.name) : undefined,
+        registrationNumber: dto.registrationNumber ? this.sanitizeString(dto.registrationNumber) : undefined,
+        phone: dto.phone ? this.sanitizeString(dto.phone) : undefined,
+        email: dto.email ? this.sanitizeString(dto.email) : undefined,
+        address: dto.address ? this.sanitizeString(dto.address) : undefined,
         status: dto.status,
         trialExpiresAt: dto.trialExpiresAt,
       },

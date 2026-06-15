@@ -67,6 +67,15 @@ export class SupportTicketsService {
         agency: { select: { id: true, name: true } },
         organization: { select: { id: true, name: true } },
         parentTicket: { select: { id: true, ticketNumber: true } },
+        childTickets: {
+          select: {
+            id: true,
+            ticketNumber: true,
+            title: true,
+            status: true,
+            createdAt: true,
+          },
+        },
       },
     });
 
@@ -85,7 +94,6 @@ export class SupportTicketsService {
         throw new ForbiddenException('You do not have access to this ticket');
       }
       
-      // Check if user has permission to view based on role and forwardTo
       const user = await this.prisma.user.findFirst({
         where: { id: userId, agencyId: agencyId, status: UserStatus.ACTIVE },
       });
@@ -99,8 +107,6 @@ export class SupportTicketsService {
         throw new ForbiddenException('You can only view your own tickets');
       }
 
-      // Agency Manager can see tickets forwarded to them
-      // General Manager can see all tickets in agency
       return ticket;
     }
 
@@ -124,7 +130,6 @@ export class SupportTicketsService {
     organizationId: string | null,
     dto: CreateSupportTicketDto,
   ) {
-    // Determine sender type
     let senderType: string;
     let targetAgencyId: string | undefined = undefined;
     let targetOrganizationId: string | undefined = undefined;
@@ -134,7 +139,6 @@ export class SupportTicketsService {
       senderType = 'AGENCY';
       targetAgencyId = agencyId;
       
-      // Determine forward target based on user role
       if (userRole === UserRole.NORMAL_USER) {
         forwardedTo = 'AGENCY_MANAGER';
       } else if (userRole === UserRole.AGENCY_MANAGER) {
@@ -152,7 +156,6 @@ export class SupportTicketsService {
 
     const ticketNumber = await this.generateTicketNumber();
 
-    // If parent ticket is provided, verify it exists
     let parentTicketId: string | null = null;
     if (dto.parentTicketId) {
       const parentTicket = await this.prisma.supportTicket.findUnique({
@@ -184,7 +187,6 @@ export class SupportTicketsService {
       },
     });
 
-    // Log activity
     await this.prisma.activityLog.create({
       data: {
         userId,
@@ -219,7 +221,6 @@ export class SupportTicketsService {
       where.agencyId = agencyId;
       where.senderType = 'AGENCY';
       
-      // Normal users can only see their own tickets
       if (userRole === UserRole.NORMAL_USER) {
         where.userId = userId;
       }
@@ -288,7 +289,7 @@ export class SupportTicketsService {
     return this.validateTicketAccess(ticketId, userId, userRole, agencyId, organizationId);
   }
 
-  // ============ Reply to Ticket ============
+  // ============ Reply to Ticket (اصلاح شده) ============
 
   async replyToTicket(
     ticketId: string,
@@ -302,6 +303,25 @@ export class SupportTicketsService {
 
     if (ticket.status === SupportTicketStatus.CLOSED || ticket.status === SupportTicketStatus.RESOLVED) {
       throw new BadRequestException('Cannot reply to a closed or resolved ticket');
+    }
+
+    // بررسی دسترسی برای پاسخ بر اساس forwardedTo
+    if (userRole === UserRole.NORMAL_USER && ticket.userId !== userId) {
+      throw new ForbiddenException('You can only reply to your own tickets');
+    }
+
+    if (userRole === UserRole.AGENCY_MANAGER && ticket.forwardedTo !== 'AGENCY_MANAGER') {
+      throw new ForbiddenException('You can only reply to tickets forwarded to you');
+    }
+
+    if (userRole === UserRole.GENERAL_MANAGER) {
+      if (ticket.forwardedTo === 'GENERAL_MANAGER') {
+      } 
+      else if (ticket.forwardedTo === 'SUPPORT' && ticket.agencyId === agencyId) {
+      }
+      else {
+        throw new ForbiddenException('شما فقط می‌توانید به تیکت‌های ارجاع شده به خودتان پاسخ دهید');
+      }
     }
 
     const reply = await this.prisma.supportTicketReply.create({
@@ -323,7 +343,6 @@ export class SupportTicketsService {
       },
     });
 
-    // Update ticket status to IN_PROGRESS if it was OPEN
     if (ticket.status === SupportTicketStatus.OPEN) {
       await this.prisma.supportTicket.update({
         where: { id: ticketId },
@@ -331,7 +350,6 @@ export class SupportTicketsService {
       });
     }
 
-    // Log activity
     await this.prisma.activityLog.create({
       data: {
         userId,
@@ -347,7 +365,7 @@ export class SupportTicketsService {
     return reply;
   }
 
-  // ============ Forward Ticket ============
+  // ============ Forward Ticket (اصلاح شده) ============
 
   async forwardTicket(
     ticketId: string,
@@ -366,22 +384,34 @@ export class SupportTicketsService {
       throw new BadRequestException('Cannot forward a closed or resolved ticket');
     }
 
-    // Check if user has permission to forward
-    let currentForwardTo = ticket.forwardedTo;
-    
-    if (userRole === UserRole.NORMAL_USER && currentForwardTo !== 'AGENCY_MANAGER') {
-      throw new ForbiddenException('You can only forward to Agency Manager');
+    // بررسی دسترسی برای ارجاع بر اساس forwardedTo
+    if (userRole === UserRole.NORMAL_USER) {
+      if (ticket.forwardedTo !== 'AGENCY_MANAGER') {
+        throw new ForbiddenException('You can only forward tickets that are forwarded to Agency Manager');
+      }
+      if (dto.forwardTo !== 'AGENCY_MANAGER') {
+        throw new ForbiddenException('Normal user can only forward to Agency Manager');
+      }
     }
     
-    if (userRole === UserRole.AGENCY_MANAGER && currentForwardTo !== 'GENERAL_MANAGER') {
-      throw new ForbiddenException('You can only forward to General Manager');
+    if (userRole === UserRole.AGENCY_MANAGER) {
+      if (ticket.forwardedTo !== 'GENERAL_MANAGER') {
+        throw new ForbiddenException('You can only forward tickets that are forwarded to General Manager');
+      }
+      if (dto.forwardTo !== 'GENERAL_MANAGER') {
+        throw new ForbiddenException('Agency Manager can only forward to General Manager');
+      }
     }
     
-    if (userRole === UserRole.GENERAL_MANAGER && currentForwardTo !== 'SUPPORT') {
-      throw new ForbiddenException('You can only forward to Support');
+    if (userRole === UserRole.GENERAL_MANAGER) {
+      if (ticket.forwardedTo !== 'GENERAL_MANAGER' && ticket.forwardedTo !== 'SUPPORT') {
+        throw new ForbiddenException('You can only forward tickets that are forwarded to you');
+      }
+      if (dto.forwardTo !== 'SUPPORT') {
+        throw new ForbiddenException('General Manager can only forward to Support');
+      }
     }
 
-    // Create a new forwarded ticket (as a child)
     const newTicketNumber = await this.generateTicketNumber();
     
     const forwardedTicket = await this.prisma.supportTicket.create({
@@ -399,13 +429,11 @@ export class SupportTicketsService {
       },
     });
 
-    // Update original ticket status
     await this.prisma.supportTicket.update({
       where: { id: ticketId },
       data: { status: SupportTicketStatus.FORWARDED },
     });
 
-    // Add a reply to original ticket noting the forward
     await this.prisma.supportTicketReply.create({
       data: {
         ticketId,
@@ -415,7 +443,6 @@ export class SupportTicketsService {
       },
     });
 
-    // Log activity
     await this.prisma.activityLog.create({
       data: {
         userId,
@@ -441,7 +468,6 @@ export class SupportTicketsService {
     userId: string,
     dto: UpdateTicketStatusDto,
   ) {
-    // Only Super Admin can change status
     const user = await this.prisma.user.findUnique({
       where: { id: userId, role: UserRole.SUPER_ADMIN, status: UserStatus.ACTIVE },
     });
@@ -466,7 +492,6 @@ export class SupportTicketsService {
       },
     });
 
-    // Add system reply about status change
     await this.prisma.supportTicketReply.create({
       data: {
         ticketId,

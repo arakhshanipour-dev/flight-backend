@@ -150,4 +150,23 @@ export class OrganizationsController {
     }
     return this.organizationsService.delete(adminId, organizationId);
   }
+
+  // ============ Search Organizations (برای صدور فاکتور) ============
+  
+  @Get('search')
+  @Roles(UserRole.AGENCY_MANAGER, UserRole.GENERAL_MANAGER)
+  @ApiOperation({ summary: 'Search organizations (for invoice creation)' })
+  @ApiQuery({ name: 'q', required: true, type: String, description: 'جستجو در نام یا شناسه ملی' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, default: 10 })
+  async searchOrganizations(
+    @Query('q') q: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (!q || q.length < 2) {
+      return { data: [] };
+    }
+    const limitNum = limit ? parseInt(limit) : 10;
+    const organizations = await this.organizationsService.searchOrganizations(q, limitNum);
+    return { data: organizations };
+  }
 }
