@@ -1,4 +1,10 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateAgencyUserDto, UpdateAgencyUserDto } from './dto';
 import { UserRole, UserStatus, AgencyStatus } from '@prisma/client';
@@ -8,8 +14,18 @@ import * as bcrypt from 'bcrypt';
 export class AgencyUsersService {
   constructor(private prisma: PrismaService) {}
 
-  // Check if user has access to this agency
-  private async validateAgencyAccess(agencyId: string, userId: string, isGeneralManager: boolean = true) {
+  // ============ Helper Methods ============
+
+  /**
+   * اعتبارسنجی دسترسی کاربر به آژانس
+   */
+  private async validateAgencyAccess(
+    agencyId: string,
+    userId: string,
+    userRole: UserRole,
+    requireGeneralManager: boolean = false,
+  ) {
+    // بررسی وجود آژانس
     const agency = await this.prisma.agency.findUnique({
       where: { id: agencyId },
       include: {
@@ -24,46 +40,159 @@ export class AgencyUsersService {
       throw new NotFoundException('Agency not found');
     }
 
+    // بررسی وضعیت آژانس
     if (agency.status !== AgencyStatus.ACTIVE && agency.status !== AgencyStatus.TRIAL) {
       throw new ForbiddenException('Agency is not active');
     }
 
-    if (isGeneralManager) {
-      const user = await this.prisma.user.findFirst({
-        where: {
-          id: userId,
-          agencyId: agencyId,
-          role: UserRole.GENERAL_MANAGER,
-          status: UserStatus.ACTIVE,
-        },
-      });
+    // بررسی وجود کاربر در آژانس
+    const user = await this.prisma.user.findFirst({
+      where: {
+        id: userId,
+        agencyId: agencyId,
+        status: UserStatus.ACTIVE,
+      },
+    });
 
-      if (!user) {
-        throw new ForbiddenException('Only General Manager can manage agency users');
+    if (!user) {
+      throw new ForbiddenException('User does not belong to this agency');
+    }
+
+    // اگر نیاز به دسترسی GENERAL_MANAGER باشد
+    if (requireGeneralManager) {
+      if (user.role !== UserRole.GENERAL_MANAGER) {
+        throw new ForbiddenException('Only General Manager can perform this action');
       }
+    }
+
+    // بررسی دسترسی AGENCY_MANAGER
+    if (userRole === UserRole.AGENCY_MANAGER) {
+      if (user.role !== UserRole.AGENCY_MANAGER) {
+        throw new ForbiddenException('Agency Manager access required');
+      }
+    }
+
+    // NORMAL_USER دسترسی محدود دارد
+    if (userRole === UserRole.NORMAL_USER) {
+      return { ...agency, isNormalUser: true };
     }
 
     return agency;
   }
 
-  async findAll(agencyId: string, currentUserId: string, page: number = 1, limit: number = 20, search?: string) {
-    await this.validateAgencyAccess(agencyId, currentUserId);
+  /**
+   * بررسی محدودیت‌های پلن برای ایجاد کاربر جدید
+   */
+  private async checkPlanLimits(agencyId: string, role: UserRole, agency: any) {
+    const activePlan = agency.agencyPlans[0]?.plan;
+    if (!activePlan) return;
+
+    if (role === UserRole.NORMAL_USER) {
+      const normalUserCount = await this.prisma.user.count({
+        where: {
+          agencyId: agencyId,
+          role: UserRole.NORMAL_USER,
+          status: UserStatus.ACTIVE,
+        },
+      });
+      if (normalUserCount >= activePlan.maxNormalUsers) {
+        throw new BadRequestException(
+          `Maximum number of normal users (${activePlan.maxNormalUsers}) reached for this agency`,
+        );
+      }
+    }
+
+    if (role === UserRole.AGENCY_MANAGER) {
+      const managerCount = await this.prisma.user.count({
+        where: {
+          agencyId: agencyId,
+          role: UserRole.AGENCY_MANAGER,
+          status: UserStatus.ACTIVE,
+        },
+      });
+      if (managerCount >= activePlan.maxAgencyManagers) {
+        throw new BadRequestException(
+          `Maximum number of agency managers (${activePlan.maxAgencyManagers}) reached for this agency`,
+        );
+      }
+    }
+  }
+
+  /**
+   * اعتبارسنجی ایمیل
+   */
+  private async validateEmail(email: string, excludeUserId?: string): Promise<void> {
+    const existingUser = await this.prisma.user.findFirst({
+      where: {
+        email: email,
+        id: excludeUserId ? { not: excludeUserId } : undefined,
+      },
+    });
+
+    if (existingUser) {
+      throw new ConflictException('User with this email already exists');
+    }
+  }
+
+  /**
+   * اعتبارسنجی نقش کاربر
+   */
+  private validateUserRole(role: UserRole): void {
+    if (role !== UserRole.AGENCY_MANAGER && role !== UserRole.NORMAL_USER) {
+      throw new BadRequestException(
+        'Invalid role. Only AGENCY_MANAGER and NORMAL_USER can be created through this endpoint',
+      );
+    }
+  }
+
+  /**
+   * سانیتیز کردن رشته‌ها
+   */
+  private sanitizeString(input: string): string {
+    return input.trim().replace(/[<>]/g, '');
+  }
+
+  // ============ CRUD Operations ============
+
+  /**
+   * دریافت لیست کاربران آژانس با صفحه‌بندی و فیلتر
+   */
+  async findAll(
+    agencyId: string,
+    currentUserId: string,
+    userRole: UserRole,
+    page: number = 1,
+    limit: number = 20,
+    search?: string,
+    role?: UserRole,
+  ) {
+    await this.validateAgencyAccess(agencyId, currentUserId, userRole);
 
     const skip = (page - 1) * limit;
-    
+
     const where: any = {
       agencyId: agencyId,
-      role: {
-        not: UserRole.GENERAL_MANAGER, // Don't show General Manager in list (can't manage self)
-      },
+      id: { not: currentUserId }, // کاربر جاری را نشان نده
     };
-    
+
+    // اگر GENERAL_MANAGER باشد، خودش را هم نشان نمی‌دهد
+    if (userRole === UserRole.GENERAL_MANAGER) {
+      where.role = { not: UserRole.GENERAL_MANAGER };
+    }
+
+    // فیلتر بر اساس نقش
+    if (role) {
+      where.role = role;
+    }
+
+    // جستجو
     if (search) {
+      const sanitizedSearch = this.sanitizeString(search);
       where.OR = [
-        { email: { contains: search, mode: 'insensitive' } },
-        { firstName: { contains: search, mode: 'insensitive' } },
-        { lastName: { contains: search, mode: 'insensitive' } },
-        { phone: { contains: search, mode: 'insensitive' } },
+        { email: { contains: sanitizedSearch, mode: 'insensitive' } },
+        { firstName: { contains: sanitizedSearch, mode: 'insensitive' } },
+        { lastName: { contains: sanitizedSearch, mode: 'insensitive' } },
+        { phone: { contains: sanitizedSearch, mode: 'insensitive' } },
       ];
     }
 
@@ -91,8 +220,8 @@ export class AgencyUsersService {
       this.prisma.user.count({ where }),
     ]);
 
-    // Calculate total penalty points for each user
-    const usersWithPenalties = users.map(user => ({
+    // محاسبه مجموع امتیاز جریمه برای هر کاربر
+    const usersWithPenalties = users.map((user) => ({
       ...user,
       penaltyPoints: user.penalties.reduce((sum, p) => sum + p.points, 0),
       penalties: undefined,
@@ -109,14 +238,29 @@ export class AgencyUsersService {
     };
   }
 
-  async findOne(agencyId: string, currentUserId: string, userId: string) {
-    await this.validateAgencyAccess(agencyId, currentUserId);
+  /**
+   * دریافت اطلاعات یک کاربر خاص
+   */
+  async findOne(
+    agencyId: string,
+    currentUserId: string,
+    userRole: UserRole,
+    userId: string,
+  ) {
+    await this.validateAgencyAccess(agencyId, currentUserId, userRole);
+
+    // اگر NORMAL_USER باشد، فقط می‌تواند خودش را ببیند
+    if (userRole === UserRole.NORMAL_USER && userId !== currentUserId) {
+      throw new ForbiddenException('You can only view your own profile');
+    }
 
     const user = await this.prisma.user.findFirst({
       where: {
         id: userId,
         agencyId: agencyId,
-        role: { not: UserRole.GENERAL_MANAGER },
+        ...(userRole !== UserRole.GENERAL_MANAGER
+          ? { role: { not: UserRole.GENERAL_MANAGER } }
+          : {}),
       },
       select: {
         id: true,
@@ -130,17 +274,33 @@ export class AgencyUsersService {
         createdAt: true,
         updatedAt: true,
         penalties: {
-          select: { points: true, reason: true, createdAt: true, ticket: { select: { ticketNumber: true } } },
+          select: {
+            points: true,
+            reason: true,
+            createdAt: true,
+            ticket: {
+              select: { ticketNumber: true },
+            },
+          },
         },
         activityLogs: {
           take: 10,
           orderBy: { createdAt: 'desc' },
-          select: { action: true, createdAt: true, entityType: true },
+          select: {
+            action: true,
+            createdAt: true,
+            entityType: true,
+          },
         },
         tickets: {
           take: 5,
           orderBy: { createdAt: 'desc' },
-          select: { ticketNumber: true, status: true, price: true, flightDate: true },
+          select: {
+            ticketNumber: true,
+            status: true,
+            price: true,
+            departureDate: true, // ✅ اصلاح شده
+          },
         },
       },
     });
@@ -149,7 +309,7 @@ export class AgencyUsersService {
       throw new NotFoundException('User not found in this agency');
     }
 
-    const totalPenaltyPoints = user.penalties.reduce((sum, p) => sum + p.points, 0);
+    const totalPenaltyPoints = user.penalties?.reduce((sum, p) => sum + p.points, 0) || 0;
 
     return {
       ...user,
@@ -157,66 +317,42 @@ export class AgencyUsersService {
     };
   }
 
-  async create(agencyId: string, currentUserId: string, dto: CreateAgencyUserDto) {
-    const agency = await this.validateAgencyAccess(agencyId, currentUserId);
-
-    // Check if user already exists
-    const existingUser = await this.prisma.user.findUnique({
-      where: { email: dto.email },
-    });
-
-    if (existingUser) {
-      throw new ConflictException('User with this email already exists');
+  /**
+   * ایجاد کاربر جدید در آژانس
+   */
+  async create(
+    agencyId: string,
+    currentUserId: string,
+    userRole: UserRole,
+    dto: CreateAgencyUserDto,
+  ) {
+    // فقط GENERAL_MANAGER و AGENCY_MANAGER می‌توانند ایجاد کنند
+    if (userRole !== UserRole.GENERAL_MANAGER && userRole !== UserRole.AGENCY_MANAGER) {
+      throw new ForbiddenException('Only General Manager or Agency Manager can create users');
     }
 
-    // Check role validity
-    if (dto.role !== UserRole.AGENCY_MANAGER && dto.role !== UserRole.NORMAL_USER) {
-      throw new BadRequestException('General Manager cannot be created through this endpoint');
-    }
+    const agency = await this.validateAgencyAccess(agencyId, currentUserId, userRole);
 
-    // Check plan limits
-    const activePlan = agency.agencyPlans[0]?.plan;
-    if (activePlan) {
-      if (dto.role === UserRole.NORMAL_USER) {
-        const normalUserCount = await this.prisma.user.count({
-          where: {
-            agencyId: agencyId,
-            role: UserRole.NORMAL_USER,
-            status: UserStatus.ACTIVE,
-          },
-        });
-        if (normalUserCount >= activePlan.maxNormalUsers) {
-          throw new BadRequestException(
-            `Maximum number of normal users (${activePlan.maxNormalUsers}) reached for this agency`,
-          );
-        }
-      }
+    // اعتبارسنجی ایمیل
+    await this.validateEmail(dto.email);
 
-      if (dto.role === UserRole.AGENCY_MANAGER) {
-        const managerCount = await this.prisma.user.count({
-          where: {
-            agencyId: agencyId,
-            role: UserRole.AGENCY_MANAGER,
-            status: UserStatus.ACTIVE,
-          },
-        });
-        if (managerCount >= activePlan.maxAgencyManagers) {
-          throw new BadRequestException(
-            `Maximum number of agency managers (${activePlan.maxAgencyManagers}) reached for this agency`,
-          );
-        }
-      }
-    }
+    // اعتبارسنجی نقش
+    this.validateUserRole(dto.role);
 
-    const hashedPassword = await bcrypt.hash(dto.password, 10);
+    // بررسی محدودیت‌های پلن
+    await this.checkPlanLimits(agencyId, dto.role, agency);
 
+    // هش کردن رمز عبور
+    const hashedPassword = await bcrypt.hash(dto.password, 12);
+
+    // ایجاد کاربر
     const user = await this.prisma.user.create({
       data: {
-        email: dto.email,
+        email: this.sanitizeString(dto.email),
         passwordHash: hashedPassword,
-        firstName: dto.firstName,
-        lastName: dto.lastName,
-        phone: dto.phone,
+        firstName: this.sanitizeString(dto.firstName),
+        lastName: this.sanitizeString(dto.lastName),
+        phone: dto.phone ? this.sanitizeString(dto.phone) : null,
         role: dto.role,
         agencyId: agencyId,
         status: UserStatus.ACTIVE,
@@ -233,7 +369,7 @@ export class AgencyUsersService {
       },
     });
 
-    // Log activity
+    // ثبت لاگ فعالیت
     await this.prisma.activityLog.create({
       data: {
         userId: currentUserId,
@@ -248,14 +384,31 @@ export class AgencyUsersService {
     return user;
   }
 
-  async update(agencyId: string, currentUserId: string, userId: string, dto: UpdateAgencyUserDto) {
-    await this.validateAgencyAccess(agencyId, currentUserId);
+  /**
+   * بروزرسانی اطلاعات کاربر
+   */
+  async update(
+    agencyId: string,
+    currentUserId: string,
+    userRole: UserRole,
+    userId: string,
+    dto: UpdateAgencyUserDto,
+  ) {
+    // فقط GENERAL_MANAGER و AGENCY_MANAGER می‌توانند بروزرسانی کنند
+    if (userRole !== UserRole.GENERAL_MANAGER && userRole !== UserRole.AGENCY_MANAGER) {
+      throw new ForbiddenException('Only General Manager or Agency Manager can update users');
+    }
 
+    await this.validateAgencyAccess(agencyId, currentUserId, userRole);
+
+    // پیدا کردن کاربر
     const user = await this.prisma.user.findFirst({
       where: {
         id: userId,
         agencyId: agencyId,
-        role: { not: UserRole.GENERAL_MANAGER },
+        ...(userRole !== UserRole.GENERAL_MANAGER
+          ? { role: { not: UserRole.GENERAL_MANAGER } }
+          : {}),
       },
     });
 
@@ -263,35 +416,32 @@ export class AgencyUsersService {
       throw new NotFoundException('User not found in this agency');
     }
 
-    // If changing email, check uniqueness
+    // اگر نقش در حال تغییر است، اعتبارسنجی شود
+    if (dto.role && dto.role !== user.role) {
+      this.validateUserRole(dto.role);
+    }
+
+    // اگر ایمیل در حال تغییر است، یکتایی بررسی شود
     if (dto.email && dto.email !== user.email) {
-      const existing = await this.prisma.user.findUnique({
-        where: { email: dto.email },
-      });
-      if (existing) {
-        throw new ConflictException('User with this email already exists');
-      }
+      await this.validateEmail(dto.email, userId);
     }
 
-    // If changing role, validate
-    if (dto.role && dto.role !== UserRole.AGENCY_MANAGER && dto.role !== UserRole.NORMAL_USER) {
-      throw new BadRequestException('Invalid role for agency user');
-    }
+    // آماده‌سازی داده‌های بروزرسانی
+    const updateData: any = {};
 
-    const updateData: any = {
-      email: dto.email,
-      firstName: dto.firstName,
-      lastName: dto.lastName,
-      phone: dto.phone,
-      role: dto.role,
-      status: dto.status,
-    };
+    if (dto.email) updateData.email = this.sanitizeString(dto.email);
+    if (dto.firstName) updateData.firstName = this.sanitizeString(dto.firstName);
+    if (dto.lastName) updateData.lastName = this.sanitizeString(dto.lastName);
+    if (dto.phone !== undefined) updateData.phone = dto.phone ? this.sanitizeString(dto.phone) : null;
+    if (dto.role) updateData.role = dto.role;
+    if (dto.status) updateData.status = dto.status;
 
-    // If password is provided, hash it
+    // اگر رمز عبور جدید داده شده، هش شود
     if (dto.password) {
-      updateData.passwordHash = await bcrypt.hash(dto.password, 10);
+      updateData.passwordHash = await bcrypt.hash(dto.password, 12);
     }
 
+    // بروزرسانی کاربر
     const updatedUser = await this.prisma.user.update({
       where: { id: userId },
       data: updateData,
@@ -307,7 +457,7 @@ export class AgencyUsersService {
       },
     });
 
-    // Log activity
+    // ثبت لاگ فعالیت
     await this.prisma.activityLog.create({
       data: {
         userId: currentUserId,
@@ -322,14 +472,29 @@ export class AgencyUsersService {
     return updatedUser;
   }
 
-  async changeStatus(agencyId: string, currentUserId: string, userId: string, status: UserStatus) {
-    await this.validateAgencyAccess(agencyId, currentUserId);
+  /**
+   * تغییر وضعیت کاربر (فعال/غیرفعال)
+   */
+  async changeStatus(
+    agencyId: string,
+    currentUserId: string,
+    userRole: UserRole,
+    userId: string,
+    status: UserStatus,
+  ) {
+    // فقط GENERAL_MANAGER می‌تواند وضعیت را تغییر دهد
+    if (userRole !== UserRole.GENERAL_MANAGER) {
+      throw new ForbiddenException('Only General Manager can change user status');
+    }
 
+    await this.validateAgencyAccess(agencyId, currentUserId, userRole, true);
+
+    // پیدا کردن کاربر
     const user = await this.prisma.user.findFirst({
       where: {
         id: userId,
         agencyId: agencyId,
-        role: { not: UserRole.GENERAL_MANAGER },
+        role: { not: UserRole.GENERAL_MANAGER }, // نمی‌تواند GENERAL_MANAGER را تغییر دهد
       },
     });
 
@@ -337,6 +502,12 @@ export class AgencyUsersService {
       throw new NotFoundException('User not found in this agency');
     }
 
+    // اگر کاربر خودش را تغییر می‌دهد
+    if (userId === currentUserId) {
+      throw new BadRequestException('You cannot change your own status');
+    }
+
+    // بروزرسانی وضعیت
     const updatedUser = await this.prisma.user.update({
       where: { id: userId },
       data: { status },
@@ -347,6 +518,7 @@ export class AgencyUsersService {
       },
     });
 
+    // ثبت لاگ فعالیت
     await this.prisma.activityLog.create({
       data: {
         userId: currentUserId,
@@ -361,14 +533,28 @@ export class AgencyUsersService {
     return updatedUser;
   }
 
-  async delete(agencyId: string, currentUserId: string, userId: string) {
-    await this.validateAgencyAccess(agencyId, currentUserId);
+  /**
+   * حذف کاربر (فقط در صورتی که بلیطی نداشته باشد)
+   */
+  async delete(
+    agencyId: string,
+    currentUserId: string,
+    userRole: UserRole,
+    userId: string,
+  ) {
+    // فقط GENERAL_MANAGER می‌تواند حذف کند
+    if (userRole !== UserRole.GENERAL_MANAGER) {
+      throw new ForbiddenException('Only General Manager can delete users');
+    }
 
+    await this.validateAgencyAccess(agencyId, currentUserId, userRole, true);
+
+    // پیدا کردن کاربر
     const user = await this.prisma.user.findFirst({
       where: {
         id: userId,
         agencyId: agencyId,
-        role: { not: UserRole.GENERAL_MANAGER },
+        role: { not: UserRole.GENERAL_MANAGER }, // نمی‌تواند GENERAL_MANAGER را حذف کند
       },
     });
 
@@ -376,14 +562,28 @@ export class AgencyUsersService {
       throw new NotFoundException('User not found in this agency');
     }
 
-    // Check if user has any tickets or invoices
-    const ticketCount = await this.prisma.ticket.count({ where: { userId: userId } });
-    if (ticketCount > 0) {
-      throw new BadRequestException(`Cannot delete user with ${ticketCount} tickets. Deactivate instead.`);
+    // اگر کاربر خودش را حذف می‌کند
+    if (userId === currentUserId) {
+      throw new BadRequestException('You cannot delete your own account');
     }
 
-    await this.prisma.user.delete({ where: { id: userId } });
+    // بررسی وجود بلیط برای کاربر
+    const ticketCount = await this.prisma.ticket.count({
+      where: { userId: userId },
+    });
 
+    if (ticketCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete user with ${ticketCount} tickets. Deactivate instead.`,
+      );
+    }
+
+    // حذف کاربر
+    await this.prisma.user.delete({
+      where: { id: userId },
+    });
+
+    // ثبت لاگ فعالیت
     await this.prisma.activityLog.create({
       data: {
         userId: currentUserId,
@@ -397,13 +597,36 @@ export class AgencyUsersService {
     return { message: 'User deleted successfully' };
   }
 
-  async getUserPenalties(agencyId: string, currentUserId: string, userId: string) {
-    await this.validateAgencyAccess(agencyId, currentUserId);
+  /**
+   * دریافت جریمه‌های کاربر
+   */
+  async getUserPenalties(
+    agencyId: string,
+    currentUserId: string,
+    userRole: UserRole,
+    userId: string,
+  ) {
+    await this.validateAgencyAccess(agencyId, currentUserId, userRole);
 
+    // اگر NORMAL_USER باشد، فقط می‌تواند جریمه‌های خودش را ببیند
+    if (userRole === UserRole.NORMAL_USER && userId !== currentUserId) {
+      throw new ForbiddenException('You can only view your own penalties');
+    }
+
+    // پیدا کردن کاربر
     const user = await this.prisma.user.findFirst({
       where: {
         id: userId,
         agencyId: agencyId,
+        ...(userRole !== UserRole.GENERAL_MANAGER
+          ? { role: { not: UserRole.GENERAL_MANAGER } }
+          : {}),
+      },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
       },
     });
 
@@ -411,6 +634,7 @@ export class AgencyUsersService {
       throw new NotFoundException('User not found in this agency');
     }
 
+    // دریافت جریمه‌ها
     const penalties = await this.prisma.penalty.findMany({
       where: { userId: userId },
       include: {
@@ -419,7 +643,7 @@ export class AgencyUsersService {
             ticketNumber: true,
             passengerName: true,
             flightNumber: true,
-            flightDate: true,
+            departureDate: true, // ✅ اصلاح شده
           },
         },
       },
@@ -437,6 +661,39 @@ export class AgencyUsersService {
       },
       totalPoints,
       penalties,
+    };
+  }
+
+  /**
+   * دریافت آمار کاربران آژانس (برای داشبورد)
+   */
+  async getUserStatistics(agencyId: string) {
+    const stats = await this.prisma.user.groupBy({
+      by: ['role', 'status'],
+      where: { agencyId: agencyId },
+      _count: true,
+    });
+
+    const total = stats.reduce((sum, s) => sum + s._count, 0);
+
+    const byRole = stats.reduce((acc, s) => {
+      const key = s.role;
+      if (!acc[key]) acc[key] = 0;
+      acc[key] += s._count;
+      return acc;
+    }, {} as Record<string, number>);
+
+    const byStatus = stats.reduce((acc, s) => {
+      const key = s.status;
+      if (!acc[key]) acc[key] = 0;
+      acc[key] += s._count;
+      return acc;
+    }, {} as Record<string, number>);
+
+    return {
+      total,
+      byRole,
+      byStatus,
     };
   }
 }

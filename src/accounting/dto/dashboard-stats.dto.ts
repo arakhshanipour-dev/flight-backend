@@ -1,7 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { AgencyComparisonDto } from './financial-report.dto';
+import { AgencyComparisonDto, MonthlyTrendDto } from './financial-report.dto';
 
-class UserStatsDto {
+export class UserStatsDto {
   @ApiProperty()
   total!: number;
 
@@ -15,7 +15,7 @@ class UserStatsDto {
   byRole!: Record<string, number>;
 }
 
-class TicketStatsDto {
+export class TicketStatsDto {
   @ApiProperty()
   total!: number;
 
@@ -32,7 +32,7 @@ class TicketStatsDto {
   invoiced!: number;
 }
 
-class InvoiceStatsDto {
+export class InvoiceStatsDto {
   @ApiProperty()
   total!: number;
 
@@ -55,7 +55,7 @@ class InvoiceStatsDto {
   unpaidAmount!: number;
 }
 
-class PaymentStatsDto {
+export class PaymentStatsDto {
   @ApiProperty()
   total!: number;
 
@@ -67,20 +67,6 @@ class PaymentStatsDto {
 
   @ApiProperty()
   totalAmount!: number;
-}
-
-export class MonthlyTrendDto {
-  @ApiProperty()
-  month!: string;
-
-  @ApiProperty()
-  revenue!: number;
-
-  @ApiProperty()
-  invoiceCount!: number;
-
-  @ApiProperty()
-  paymentCount!: number;
 }
 
 export class AgencyDashboardStatsDto {
@@ -152,4 +138,3 @@ export class SupportDashboardStatsDto {
   @ApiProperty({ type: [MonthlyTrendDto] })
   overallTrends!: MonthlyTrendDto[];
 }
-

@@ -1,5 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { IsDateString, IsOptional, IsEnum, IsUUID } from 'class-validator';
+import { InvoiceStatus } from '@prisma/client';
+import { CashFlowReportDto } from './cash-flow-report.dto'; // 🔥 import از cash-flow-report
 
 export enum ReportPeriod {
   DAILY = 'DAILY',
@@ -127,3 +129,106 @@ export class AgencyComparisonDto {
   @ApiProperty()
   totalTickets!: number;
 }
+
+// ============ 🔥 MonthlyTrendDto ============
+export class MonthlyTrendDto {
+  @ApiProperty()
+  month!: string;
+
+  @ApiProperty()
+  revenue!: number;
+
+  @ApiProperty()
+  invoiceCount!: number;
+
+  @ApiProperty()
+  paymentCount!: number;
+}
+
+// ============ 🔥 Invoice Summary DTOs ============
+export class InvoiceSummaryItemDto {
+  @ApiProperty()
+  invoiceNumber!: string;
+
+  @ApiProperty()
+  agencyName!: string;
+
+  @ApiProperty()
+  customerName!: string;
+
+  @ApiProperty()
+  total!: number;
+
+  @ApiProperty({ enum: InvoiceStatus })
+  status!: InvoiceStatus;
+
+  @ApiProperty()
+  issuedAt!: Date;
+
+  @ApiProperty()
+  ticketCount!: number;
+}
+
+export class InvoiceSummaryDto {
+  @ApiProperty()
+  total!: number;
+
+  @ApiProperty()
+  totalAmount!: number;
+
+  @ApiProperty()
+  paid!: number;
+
+  @ApiProperty()
+  paidAmount!: number;
+
+  @ApiProperty()
+  unpaid!: number;
+
+  @ApiProperty()
+  unpaidAmount!: number;
+
+  @ApiProperty({ type: [InvoiceSummaryItemDto] })
+  invoices!: InvoiceSummaryItemDto[];
+}
+
+// ============ 🔥 Payment Summary DTOs ============
+export class PaymentSummaryItemDto {
+  @ApiProperty({ nullable: true })
+  trackingCode!: string | null;
+
+  @ApiProperty()
+  amount!: number;
+
+  @ApiProperty()
+  agencyName!: string;
+
+  @ApiProperty()
+  invoiceNumber!: string;
+
+  @ApiProperty()
+  customerName!: string;
+
+  @ApiProperty({ nullable: true })
+  paidAt!: Date | null;
+}
+
+export class PaymentSummaryDto {
+  @ApiProperty()
+  total!: number;
+
+  @ApiProperty()
+  totalAmount!: number;
+
+  @ApiProperty({ type: [PaymentSummaryItemDto] })
+  payments!: PaymentSummaryItemDto[];
+}
+
+// ============ 🔥 تایپ ترکیبی برای گزارشات ============
+export type ReportResult =
+  | ProfitLossReportDto
+  | BalanceSheetDto
+  | CashFlowReportDto  // 🔥 از cash-flow-report.dto.ts import شده
+  | InvoiceSummaryDto
+  | PaymentSummaryDto
+  | AgencyComparisonDto[];

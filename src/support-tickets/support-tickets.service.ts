@@ -7,7 +7,13 @@ import {
   ForwardTarget,
   UpdateTicketStatusDto 
 } from './dto';
-import { SupportTicketStatus, SupportTicketPriority, UserRole, UserStatus } from '@prisma/client';
+import { 
+  SupportTicketStatus, 
+  SupportTicketPriority, 
+  UserRole, 
+  UserStatus,
+  SupportSenderType,  // 🔥 اضافه شد
+} from '@prisma/client';
 
 @Injectable()
 export class SupportTicketsService {
@@ -32,252 +38,287 @@ export class SupportTicketsService {
     return `TKT-${sequence.toString().padStart(6, '0')}`;
   }
 
-  private async validateTicketAccess(
-    ticketId: string, 
-    userId: string, 
-    userRole: UserRole, 
-    agencyId?: string | null, 
-    organizationId?: string | null
-  ) {
-    const ticket = await this.prisma.supportTicket.findUnique({
-      where: { id: ticketId },
-      include: {
-        replies: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                role: true,
-              },
-            },
-          },
-          orderBy: { createdAt: 'asc' },
-        },
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            email: true,
-            role: true,
-          },
-        },
-        agency: { select: { id: true, name: true } },
-        organization: { select: { id: true, name: true } },
-        parentTicket: { select: { id: true, ticketNumber: true } },
-        childTickets: {
-          select: {
-            id: true,
-            ticketNumber: true,
-            title: true,
-            status: true,
-            createdAt: true,
-          },
-        },
-      },
-    });
-
-    if (!ticket) {
-      throw new NotFoundException('Ticket not found');
-    }
-
-    // Super Admin can access all tickets
-    if (userRole === UserRole.SUPER_ADMIN) {
-      return ticket;
-    }
-
-    // Agency users
-    if (ticket.senderType === 'AGENCY' && agencyId) {
-      if (ticket.agencyId !== agencyId) {
-        throw new ForbiddenException('You do not have access to this ticket');
-      }
-      
-      const user = await this.prisma.user.findFirst({
-        where: { id: userId, agencyId: agencyId, status: UserStatus.ACTIVE },
-      });
-
-      if (!user) {
-        throw new ForbiddenException('Access denied');
-      }
-
-      // Normal user can only see their own tickets
-      if (userRole === UserRole.NORMAL_USER && ticket.userId !== userId) {
-        throw new ForbiddenException('You can only view your own tickets');
-      }
-
-      return ticket;
-    }
-
-    // Organization users
-    if (ticket.senderType === 'ORGANIZATION' && organizationId) {
-      if (ticket.organizationId !== organizationId) {
-        throw new ForbiddenException('You do not have access to this ticket');
-      }
-      return ticket;
-    }
-
-    throw new ForbiddenException('You do not have access to this ticket');
-  }
-
-  // ============ Create Ticket ============
-
-  async createTicket(
-    userId: string,
-    userRole: UserRole,
-    agencyId: string | null,
-    organizationId: string | null,
-    dto: CreateSupportTicketDto,
-  ) {
-    let senderType: string;
-    let targetAgencyId: string | undefined = undefined;
-    let targetOrganizationId: string | undefined = undefined;
-    let forwardedTo: string | null = null;
-
-    if (agencyId) {
-      senderType = 'AGENCY';
-      targetAgencyId = agencyId;
-      
-      if (userRole === UserRole.NORMAL_USER) {
-        forwardedTo = 'AGENCY_MANAGER';
-      } else if (userRole === UserRole.AGENCY_MANAGER) {
-        forwardedTo = 'GENERAL_MANAGER';
-      } else if (userRole === UserRole.GENERAL_MANAGER) {
-        forwardedTo = 'SUPPORT';
-      }
-    } else if (organizationId) {
-      senderType = 'ORGANIZATION';
-      targetOrganizationId = organizationId;
-      forwardedTo = 'SUPPORT';
-    } else {
-      throw new BadRequestException('Either agencyId or organizationId is required');
-    }
-
-    const ticketNumber = await this.generateTicketNumber();
-
-    let parentTicketId: string | null = null;
-    if (dto.parentTicketId) {
-      const parentTicket = await this.prisma.supportTicket.findUnique({
-        where: { id: dto.parentTicketId },
-      });
-      if (!parentTicket) {
-        throw new NotFoundException('Parent ticket not found');
-      }
-      parentTicketId = dto.parentTicketId;
-    }
-
-    const ticket = await this.prisma.supportTicket.create({
-      data: {
-        ticketNumber,
-        title: dto.title,
-        description: dto.description,
-        priority: dto.priority || SupportTicketPriority.MEDIUM,
-        status: SupportTicketStatus.OPEN,
-        senderType,
-        agencyId: targetAgencyId,
-        organizationId: targetOrganizationId,
-        userId,
-        forwardedTo,
-        parentTicketId: parentTicketId as string | undefined,
-      },
-      include: {
-        agency: { select: { name: true } },
-        organization: { select: { name: true } },
-      },
-    });
-
-    await this.prisma.activityLog.create({
-      data: {
-        userId,
-        agencyId: targetAgencyId,
-        organizationId: targetOrganizationId,
-        action: 'CREATE_SUPPORT_TICKET',
-        entityType: 'SupportTicket',
-        entityId: ticket.id,
-        newData: { ticketNumber, title: dto.title },
-      },
-    });
-
-    return ticket;
-  }
-
-  // ============ Get Tickets ============
-
-  async getMyTickets(
-    userId: string,
-    userRole: UserRole,
-    agencyId: string | null,
-    organizationId: string | null,
-    page: number = 1,
-    limit: number = 20,
-    status?: SupportTicketStatus,
-  ) {
-    const skip = (page - 1) * limit;
-    
-    const where: any = {};
-
-    if (agencyId) {
-      where.agencyId = agencyId;
-      where.senderType = 'AGENCY';
-      
-      if (userRole === UserRole.NORMAL_USER) {
-        where.userId = userId;
-      }
-    } else if (organizationId) {
-      where.organizationId = organizationId;
-      where.senderType = 'ORGANIZATION';
-    } else if (userRole === UserRole.SUPER_ADMIN) {
-      // Super admin sees all
-    } else {
-      throw new BadRequestException('No agency or organization context');
-    }
-
-    if (status) {
-      where.status = status;
-    }
-
-    const [tickets, total] = await Promise.all([
-      this.prisma.supportTicket.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: { createdAt: 'desc' },
+private async validateTicketAccess(
+  ticketId: string, 
+  userId: string, 
+  userRole: UserRole, 
+  agencyId?: string | null, 
+  organizationId?: string | null
+) {
+  const ticket = await this.prisma.supportTicket.findUnique({
+    where: { id: ticketId },
+    include: {
+      replies: {
         include: {
           user: {
             select: {
               id: true,
               firstName: true,
               lastName: true,
-              email: true,
-            },
-          },
-          agency: { select: { name: true } },
-          organization: { select: { name: true } },
-          replies: {
-            take: 1,
-            orderBy: { createdAt: 'desc' },
-            include: {
-              user: {
-                select: { firstName: true, lastName: true, role: true },
-              },
+              role: true,
             },
           },
         },
-      }),
-      this.prisma.supportTicket.count({ where }),
-    ]);
-
-    return {
-      data: tickets,
-      meta: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
+        orderBy: { createdAt: 'asc' },
       },
-    };
+      user: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          role: true,
+        },
+      },
+      agency: { select: { id: true, name: true } },
+      organization: { select: { id: true, name: true } },
+      parentTicket: { select: { id: true, ticketNumber: true } },
+      childTickets: {
+        select: {
+          id: true,
+          ticketNumber: true,
+          title: true,
+          status: true,
+          createdAt: true,
+        },
+      },
+    },
+  });
+
+  if (!ticket) {
+    throw new NotFoundException('Ticket not found');
   }
+
+  // Super Admin: دسترسی کامل
+  if (userRole === UserRole.SUPER_ADMIN) {
+    return ticket;
+  }
+
+  // 🔥 کاربران آژانس
+  if (ticket.senderType === SupportSenderType.AGENCY && agencyId) {
+    // بررسی اینکه تیکت متعلق به این آژانس باشد
+    if (ticket.agencyId !== agencyId) {
+      throw new ForbiddenException('You do not have access to this ticket');
+    }
+    
+    const user = await this.prisma.user.findFirst({
+      where: { id: userId, agencyId: agencyId, status: UserStatus.ACTIVE },
+    });
+
+    if (!user) {
+      throw new ForbiddenException('Access denied');
+    }
+
+    // 🔥 کاربر عادی: فقط تیکت‌های خودش
+    if (userRole === UserRole.NORMAL_USER && ticket.userId !== userId) {
+      throw new ForbiddenException('You can only view your own tickets');
+    }
+
+    // 🔥 مدیر آژانس: دسترسی به تیکت‌های ارجاع شده به خودش
+    if (userRole === UserRole.AGENCY_MANAGER) {
+      // اگر تیکت به مدیر آژانس ارجاع نشده باشد، اجازه دسترسی ندارد
+      if (ticket.forwardedTo !== 'AGENCY_MANAGER' && ticket.userId !== userId) {
+        throw new ForbiddenException('You can only view tickets forwarded to you');
+      }
+      return ticket;
+    }
+
+    // 🔥 مدیر کل: دسترسی کامل به همه تیکت‌های آژانس
+    if (userRole === UserRole.GENERAL_MANAGER) {
+      return ticket;
+    }
+
+    return ticket;
+  }
+
+  // 🔥 کاربران سازمان
+  if (ticket.senderType === SupportSenderType.ORGANIZATION && organizationId) {
+    if (ticket.organizationId !== organizationId) {
+      throw new ForbiddenException('You do not have access to this ticket');
+    }
+    return ticket;
+  }
+
+  throw new ForbiddenException('You do not have access to this ticket');
+}
+// ============ Create Ticket ============
+
+async createTicket(
+  userId: string,
+  userRole: UserRole,
+  agencyId: string | null,
+  organizationId: string | null,
+  dto: CreateSupportTicketDto,
+) {
+  let senderType: SupportSenderType;
+  let targetAgencyId: string | undefined = undefined;
+  let targetOrganizationId: string | undefined = undefined;
+  let forwardedTo: string | null = null;
+
+  if (agencyId) {
+    senderType = SupportSenderType.AGENCY;
+    targetAgencyId = agencyId;
+    
+    // 🔥 تنظیم forwardedTo بر اساس نقش کاربر
+    if (userRole === UserRole.NORMAL_USER) {
+      forwardedTo = 'AGENCY_MANAGER';
+    } else if (userRole === UserRole.AGENCY_MANAGER) {
+      forwardedTo = 'GENERAL_MANAGER';
+    } else if (userRole === UserRole.GENERAL_MANAGER) {
+      // ✅ مدیر کل تیکت را به تیم پشتیبانی ارجاع می‌دهد
+      forwardedTo = 'SUPPORT';
+    }
+  } else if (organizationId) {
+    senderType = SupportSenderType.ORGANIZATION;
+    targetOrganizationId = organizationId;
+    forwardedTo = 'SUPPORT';
+  } else {
+    throw new BadRequestException('Either agencyId or organizationId is required');
+  }
+
+  const ticketNumber = await this.generateTicketNumber();
+
+  let parentTicketId: string | null = null;
+  if (dto.parentTicketId) {
+    const parentTicket = await this.prisma.supportTicket.findUnique({
+      where: { id: dto.parentTicketId },
+    });
+    if (!parentTicket) {
+      throw new NotFoundException('Parent ticket not found');
+    }
+    parentTicketId = dto.parentTicketId;
+  }
+
+  const ticket = await this.prisma.supportTicket.create({
+    data: {
+      ticketNumber,
+      title: dto.title,
+      description: dto.description,
+      priority: dto.priority || SupportTicketPriority.MEDIUM,
+      status: SupportTicketStatus.OPEN,
+      senderType,
+      agencyId: targetAgencyId,
+      organizationId: targetOrganizationId,
+      userId,
+      forwardedTo,
+      parentTicketId: parentTicketId as string | undefined,
+    },
+    include: {
+      agency: { select: { name: true } },
+      organization: { select: { name: true } },
+    },
+  });
+
+  await this.prisma.activityLog.create({
+    data: {
+      userId,
+      agencyId: targetAgencyId,
+      organizationId: targetOrganizationId,
+      action: 'CREATE_SUPPORT_TICKET',
+      entityType: 'SupportTicket',
+      entityId: ticket.id,
+      newData: { ticketNumber, title: dto.title, forwardedTo },
+    },
+  });
+
+  return ticket;
+}
+
+  // ============ Get Tickets ============
+
+
+async getMyTickets(
+  userId: string,
+  userRole: UserRole,
+  agencyId: string | null,
+  organizationId: string | null,
+  page: number = 1,
+  limit: number = 20,
+  status?: SupportTicketStatus,
+) {
+  const skip = (page - 1) * limit;
+  
+  const where: any = {};
+
+  // 🔥 SUPER_ADMIN: همه تیکت‌ها
+  if (userRole === UserRole.SUPER_ADMIN) {
+    // همه تیکت‌ها
+  }
+  // 🔥 کاربران آژانس
+  else if (agencyId) {
+    where.agencyId = agencyId;
+    where.senderType = SupportSenderType.AGENCY;
+    
+    // 🔥 کاربر عادی: فقط تیکت‌های خودش
+    if (userRole === UserRole.NORMAL_USER) {
+      where.userId = userId;
+    }
+    // 🔥 مدیر آژانس: تیکت‌های ارجاع شده به خودش + تیکت‌های خودش
+    else if (userRole === UserRole.AGENCY_MANAGER) {
+      where.OR = [
+        { forwardedTo: 'AGENCY_MANAGER' },
+        { userId: userId },
+      ];
+    }
+    // 🔥 مدیر کل: همه تیکت‌های آژانس (دسترسی کامل)
+    else if (userRole === UserRole.GENERAL_MANAGER) {
+      // ✅ مدیر کل به همه تیکت‌های آژانس دسترسی دارد
+      // بدون فیلتر forwardedTo
+    }
+  }
+  // 🔥 کاربران سازمان
+  else if (organizationId) {
+    where.organizationId = organizationId;
+    where.senderType = SupportSenderType.ORGANIZATION;
+  } else {
+    throw new BadRequestException('No agency or organization context');
+  }
+
+  if (status) {
+    where.status = status;
+  }
+
+  const [tickets, total] = await Promise.all([
+    this.prisma.supportTicket.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        user: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+          },
+        },
+        agency: { select: { id: true, name: true } },
+        organization: { select: { id: true, name: true } },
+        replies: {
+          take: 1,
+          orderBy: { createdAt: 'desc' },
+          include: {
+            user: {
+              select: { firstName: true, lastName: true, role: true },
+            },
+          },
+        },
+      },
+    }),
+    this.prisma.supportTicket.count({ where }),
+  ]);
+
+  return {
+    data: tickets,
+    meta: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+    },
+  };
+}
 
   async getTicket(
     ticketId: string,
@@ -289,83 +330,78 @@ export class SupportTicketsService {
     return this.validateTicketAccess(ticketId, userId, userRole, agencyId, organizationId);
   }
 
-  // ============ Reply to Ticket (اصلاح شده) ============
 
-  async replyToTicket(
-    ticketId: string,
-    userId: string,
-    userRole: UserRole,
-    agencyId: string | null,
-    organizationId: string | null,
-    dto: ReplyToTicketDto,
-  ) {
-    const ticket = await this.validateTicketAccess(ticketId, userId, userRole, agencyId, organizationId);
+// ============ Reply to Ticket ============
 
-    if (ticket.status === SupportTicketStatus.CLOSED || ticket.status === SupportTicketStatus.RESOLVED) {
-      throw new BadRequestException('Cannot reply to a closed or resolved ticket');
-    }
+async replyToTicket(
+  ticketId: string,
+  userId: string,
+  userRole: UserRole,
+  agencyId: string | null,
+  organizationId: string | null,
+  dto: ReplyToTicketDto,
+) {
+  const ticket = await this.validateTicketAccess(ticketId, userId, userRole, agencyId, organizationId);
 
-    // بررسی دسترسی برای پاسخ بر اساس forwardedTo
-    if (userRole === UserRole.NORMAL_USER && ticket.userId !== userId) {
-      throw new ForbiddenException('You can only reply to your own tickets');
-    }
-
-    if (userRole === UserRole.AGENCY_MANAGER && ticket.forwardedTo !== 'AGENCY_MANAGER') {
-      throw new ForbiddenException('You can only reply to tickets forwarded to you');
-    }
-
-    if (userRole === UserRole.GENERAL_MANAGER) {
-      if (ticket.forwardedTo === 'GENERAL_MANAGER') {
-      } 
-      else if (ticket.forwardedTo === 'SUPPORT' && ticket.agencyId === agencyId) {
-      }
-      else {
-        throw new ForbiddenException('شما فقط می‌توانید به تیکت‌های ارجاع شده به خودتان پاسخ دهید');
-      }
-    }
-
-    const reply = await this.prisma.supportTicketReply.create({
-      data: {
-        ticketId,
-        userId,
-        message: dto.message,
-        isInternal: dto.isInternal || false,
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            role: true,
-          },
-        },
-      },
-    });
-
-    if (ticket.status === SupportTicketStatus.OPEN) {
-      await this.prisma.supportTicket.update({
-        where: { id: ticketId },
-        data: { status: SupportTicketStatus.IN_PROGRESS },
-      });
-    }
-
-    await this.prisma.activityLog.create({
-      data: {
-        userId,
-        agencyId: ticket.agencyId,
-        organizationId: ticket.organizationId,
-        action: 'REPLY_TO_SUPPORT_TICKET',
-        entityType: 'SupportTicketReply',
-        entityId: reply.id,
-        newData: { ticketId, isInternal: dto.isInternal },
-      },
-    });
-
-    return reply;
+  if (ticket.status === SupportTicketStatus.CLOSED || ticket.status === SupportTicketStatus.RESOLVED) {
+    throw new BadRequestException('Cannot reply to a closed or resolved ticket');
   }
 
-  // ============ Forward Ticket (اصلاح شده) ============
+  // 🔥 بررسی دسترسی برای پاسخ بر اساس نقش
+  if (userRole === UserRole.NORMAL_USER && ticket.userId !== userId) {
+    throw new ForbiddenException('You can only reply to your own tickets');
+  }
+
+  if (userRole === UserRole.AGENCY_MANAGER && ticket.forwardedTo !== 'AGENCY_MANAGER' && ticket.userId !== userId) {
+    throw new ForbiddenException('You can only reply to tickets forwarded to you');
+  }
+
+  // ✅ مدیر کل می‌تواند به هر تیکت آژانس پاسخ دهد
+  if (userRole === UserRole.GENERAL_MANAGER) {
+    // مدیر کل دسترسی کامل دارد
+  }
+
+  const reply = await this.prisma.supportTicketReply.create({
+    data: {
+      ticketId,
+      userId,
+      message: dto.message,
+      isInternal: dto.isInternal || false,
+    },
+    include: {
+      user: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          role: true,
+        },
+      },
+    },
+  });
+
+  if (ticket.status === SupportTicketStatus.OPEN) {
+    await this.prisma.supportTicket.update({
+      where: { id: ticketId },
+      data: { status: SupportTicketStatus.IN_PROGRESS },
+    });
+  }
+
+  await this.prisma.activityLog.create({
+    data: {
+      userId,
+      agencyId: ticket.agencyId,
+      organizationId: ticket.organizationId,
+      action: 'REPLY_TO_SUPPORT_TICKET',
+      entityType: 'SupportTicketReply',
+      entityId: reply.id,
+      newData: { ticketId, isInternal: dto.isInternal },
+    },
+  });
+
+  return reply;
+}
+  // ============ Forward Ticket ============
 
   async forwardTicket(
     ticketId: string,
@@ -376,7 +412,7 @@ export class SupportTicketsService {
   ) {
     const ticket = await this.validateTicketAccess(ticketId, userId, userRole, agencyId, null);
 
-    if (ticket.senderType !== 'AGENCY') {
+    if (ticket.senderType !== SupportSenderType.AGENCY) {  // 🔥 اصلاح
       throw new BadRequestException('Only agency tickets can be forwarded');
     }
 
@@ -421,7 +457,7 @@ export class SupportTicketsService {
         description: `${ticket.description}\n\n---\nForwarded by: ${ticket.user.firstName} ${ticket.user.lastName}\nNotes: ${dto.notes || 'No additional notes'}`,
         priority: ticket.priority,
         status: SupportTicketStatus.OPEN,
-        senderType: 'AGENCY',
+        senderType: SupportSenderType.AGENCY,  // 🔥 اصلاح
         agencyId: ticket.agencyId,
         userId: ticket.userId,
         forwardedTo: dto.forwardTo,
@@ -510,7 +546,7 @@ export class SupportTicketsService {
     page: number = 1,
     limit: number = 20,
     status?: SupportTicketStatus,
-    senderType?: string,
+    senderType?: SupportSenderType,  // 🔥 اصلاح
     priority?: SupportTicketPriority,
   ) {
     const skip = (page - 1) * limit;

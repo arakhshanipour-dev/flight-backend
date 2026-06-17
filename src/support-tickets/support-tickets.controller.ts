@@ -29,7 +29,7 @@ import {
 } from './dto';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
-import { SupportTicketStatus, SupportTicketPriority, UserRole } from '@prisma/client';
+import { SupportTicketStatus, SupportTicketPriority, UserRole, SupportSenderType } from '@prisma/client';  // 🔥 اضافه شد
 
 @ApiTags('Support Tickets')
 @ApiBearerAuth('JWT-auth')
@@ -42,6 +42,9 @@ export class SupportTicketsController {
   @Post()
   @Roles(UserRole.NORMAL_USER, UserRole.AGENCY_MANAGER, UserRole.GENERAL_MANAGER, UserRole.ORGANIZATION_ADMIN)
   @ApiOperation({ summary: 'Create a new support ticket' })
+  @ApiResponse({ status: 201, description: 'Ticket created successfully' })
+  @ApiResponse({ status: 400, description: 'Bad request' })
+  @ApiResponse({ status: 403, description: 'Access denied' })
   async create(
     @CurrentUser('id') userId: string,
     @CurrentUser('role') userRole: UserRole,
@@ -63,6 +66,7 @@ export class SupportTicketsController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiQuery({ name: 'status', required: false, enum: SupportTicketStatus })
+  @ApiResponse({ status: 200, description: 'Tickets retrieved successfully' })
   async getMyTickets(
     @CurrentUser('id') userId: string,
     @CurrentUser('role') userRole: UserRole,
@@ -89,6 +93,9 @@ export class SupportTicketsController {
   @Get(':ticketId')
   @Roles(UserRole.NORMAL_USER, UserRole.AGENCY_MANAGER, UserRole.GENERAL_MANAGER, UserRole.ORGANIZATION_ADMIN, UserRole.SUPER_ADMIN)
   @ApiOperation({ summary: 'Get a specific ticket' })
+  @ApiResponse({ status: 200, description: 'Ticket retrieved successfully' })
+  @ApiResponse({ status: 404, description: 'Ticket not found' })
+  @ApiResponse({ status: 403, description: 'Access denied' })
   async getTicket(
     @Param('ticketId', ParseUUIDPipe) ticketId: string,
     @CurrentUser('id') userId: string,
@@ -107,6 +114,10 @@ export class SupportTicketsController {
   @Post(':ticketId/reply')
   @Roles(UserRole.NORMAL_USER, UserRole.AGENCY_MANAGER, UserRole.GENERAL_MANAGER, UserRole.ORGANIZATION_ADMIN, UserRole.SUPER_ADMIN)
   @ApiOperation({ summary: 'Reply to a support ticket' })
+  @ApiResponse({ status: 201, description: 'Reply added successfully' })
+  @ApiResponse({ status: 400, description: 'Cannot reply to closed ticket' })
+  @ApiResponse({ status: 404, description: 'Ticket not found' })
+  @ApiResponse({ status: 403, description: 'Access denied' })
   async replyToTicket(
     @Param('ticketId', ParseUUIDPipe) ticketId: string,
     @CurrentUser('id') userId: string,
@@ -126,6 +137,10 @@ export class SupportTicketsController {
   @Post(':ticketId/forward')
   @Roles(UserRole.NORMAL_USER, UserRole.AGENCY_MANAGER, UserRole.GENERAL_MANAGER)
   @ApiOperation({ summary: 'Forward a ticket to higher level (Agency only)' })
+  @ApiResponse({ status: 201, description: 'Ticket forwarded successfully' })
+  @ApiResponse({ status: 400, description: 'Bad request' })
+  @ApiResponse({ status: 404, description: 'Ticket not found' })
+  @ApiResponse({ status: 403, description: 'Access denied' })
   async forwardTicket(
     @Param('ticketId', ParseUUIDPipe) ticketId: string,
     @CurrentUser('id') userId: string,
@@ -147,13 +162,15 @@ export class SupportTicketsController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiQuery({ name: 'status', required: false, enum: SupportTicketStatus })
-  @ApiQuery({ name: 'senderType', required: false, type: String })
+  @ApiQuery({ name: 'senderType', required: false, enum: SupportSenderType })  // 🔥 اصلاح
   @ApiQuery({ name: 'priority', required: false, enum: SupportTicketPriority })
+  @ApiResponse({ status: 200, description: 'All tickets retrieved successfully' })
+  @ApiResponse({ status: 403, description: 'Super Admin access required' })
   async getAllTickets(
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('status') status?: SupportTicketStatus,
-    @Query('senderType') senderType?: string,
+    @Query('senderType') senderType?: SupportSenderType,  // 🔥 اصلاح
     @Query('priority') priority?: SupportTicketPriority,
   ) {
     return this.ticketsService.getAllTickets(
@@ -168,6 +185,8 @@ export class SupportTicketsController {
   @Get('admin/stats')
   @Roles(UserRole.SUPER_ADMIN)
   @ApiOperation({ summary: 'Get ticket statistics (Super Admin only)' })
+  @ApiResponse({ status: 200, description: 'Statistics retrieved successfully' })
+  @ApiResponse({ status: 403, description: 'Super Admin access required' })
   async getTicketStats() {
     return this.ticketsService.getTicketStats();
   }
@@ -176,6 +195,9 @@ export class SupportTicketsController {
   @Roles(UserRole.SUPER_ADMIN)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Update ticket status (Super Admin only)' })
+  @ApiResponse({ status: 200, description: 'Ticket status updated successfully' })
+  @ApiResponse({ status: 404, description: 'Ticket not found' })
+  @ApiResponse({ status: 403, description: 'Super Admin access required' })
   async updateTicketStatus(
     @Param('ticketId', ParseUUIDPipe) ticketId: string,
     @CurrentUser('id') userId: string,

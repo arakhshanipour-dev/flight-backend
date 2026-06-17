@@ -1,5 +1,6 @@
+// src/payments/dto/payment-response.dto.ts
 import { ApiProperty } from '@nestjs/swagger';
-import { PaymentStatus } from '@prisma/client';
+import { PaymentStatus, PaymentMethod } from '@prisma/client';
 
 export class PaymentResponseDto {
   @ApiProperty()
@@ -14,8 +15,8 @@ export class PaymentResponseDto {
   @ApiProperty()
   agencyId!: string;
 
-  @ApiProperty()
-  bankCardId!: string;
+  @ApiProperty({ nullable: true })
+  bankCardId!: string | null;
 
   @ApiProperty()
   bankName!: string;
@@ -23,8 +24,17 @@ export class PaymentResponseDto {
   @ApiProperty()
   amount!: number;
 
+  @ApiProperty({ enum: PaymentMethod })
+  paymentMethod!: PaymentMethod;
+
   @ApiProperty({ nullable: true })
   trackingCode!: string | null;
+
+  @ApiProperty({ nullable: true })
+  receiptNumber!: string | null;
+
+  @ApiProperty({ nullable: true })
+  notes!: string | null;
 
   @ApiProperty({ enum: PaymentStatus })
   status!: PaymentStatus;
@@ -34,4 +44,7 @@ export class PaymentResponseDto {
 
   @ApiProperty()
   createdAt!: Date;
+
+  @ApiProperty({ nullable: true })
+  remainingAmount?: number | null;
 }

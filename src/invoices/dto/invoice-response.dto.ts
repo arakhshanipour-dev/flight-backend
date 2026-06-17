@@ -1,98 +1,145 @@
+// src/invoices/dto/invoice-response.dto.ts
 import { ApiProperty } from '@nestjs/swagger';
-import { InvoiceStatus } from '@prisma/client';
+import { InvoiceStatus, PaymentStatus, PaymentMethod, TicketStatus } from '@prisma/client';
 
+// ============ DTO برای بلیط‌های داخل فاکتور ============
 class TicketInInvoiceDto {
-  @ApiProperty()
+  @ApiProperty({ description: 'شناسه بلیط' })
   id!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'شماره بلیط' })
   ticketNumber!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'نام مسافر' })
   passengerName!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'شماره تماس مسافر' })
   passengerPhone!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'شماره پرواز' })
   flightNumber!: string;
 
-  @ApiProperty()
-  origin!: string;
+  @ApiProperty({ description: 'مسیر', nullable: true })  // 🔥 اصلاح: به جای origin و destination
+  route!: string | null;
 
-  @ApiProperty()
-  destination!: string;
-
-  @ApiProperty()
+  @ApiProperty({ description: 'تاریخ پرواز' })
   flightDate!: Date;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'کلاس پرواز' })
   seatClass!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'قیمت' })
   price!: number;
+
+  @ApiProperty({ enum: TicketStatus })
+  status!: TicketStatus;
 }
 
+// ============ DTO برای کارت بانکی داخل فاکتور ============
 class BankCardInInvoiceDto {
-  @ApiProperty()
+  @ApiProperty({ description: 'شناسه کارت بانکی' })
   id!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'نام بانک' })
   bankName!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'صاحب حساب' })
   accountHolder!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'شماره کارت ماسک شده', example: '****-****-****-1234' })
   maskedCardNumber!: string;
 }
 
-export class InvoiceResponseDto {
-  @ApiProperty()
+// ============ DTO برای پرداخت‌های داخل فاکتور ============
+class PaymentInInvoiceDto {
+  @ApiProperty({ description: 'شناسه پرداخت' })
   id!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'مبلغ پرداخت شده' })
+  amount!: number;
+
+  @ApiProperty({ enum: PaymentStatus, description: 'وضعیت پرداخت' })
+  status!: PaymentStatus;
+
+  @ApiProperty({ enum: PaymentMethod, description: 'روش پرداخت' })
+  paymentMethod!: PaymentMethod;
+
+  @ApiProperty({ description: 'کد رهگیری', nullable: true })
+  trackingCode!: string | null;
+
+  @ApiProperty({ description: 'شماره رسید نقدی', nullable: true })
+  receiptNumber!: string | null;
+
+  @ApiProperty({ description: 'تاریخ پرداخت', nullable: true })
+  paidAt!: Date | null;
+}
+
+// ============ DTO اصلی پاسخ فاکتور ============
+export class InvoiceResponseDto {
+  @ApiProperty({ description: 'شناسه فاکتور' })
+  id!: string;
+
+  @ApiProperty({ description: 'شماره فاکتور یکتا' })
   invoiceNumber!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'نام آژانس' })
   agencyName!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'نام مشتری' })
   customerName!: string;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({ description: 'شماره تماس مشتری', nullable: true })
   customerPhone!: string | null;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({ description: 'شناسه سازمان (اگر مشتری سازمانی است)', nullable: true })
   organizationId!: string | null;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'طرح فاکتور (۱، ۲، یا ۳)', minimum: 1, maximum: 3 })
   templateStyle!: number;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'جمع قیمت بلیط‌ها (بدون مالیات)' })
   subtotal!: number;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'مبلغ کل فاکتور' })
   total!: number;
 
-  @ApiProperty({ enum: InvoiceStatus })
+  @ApiProperty({ enum: InvoiceStatus, description: 'وضعیت فاکتور' })
   status!: InvoiceStatus;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({ description: 'تاریخ صدور فاکتور' })
   issuedAt!: Date;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({ description: 'تاریخ تکمیل پرداخت', nullable: true })
   paidAt!: Date | null;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'تاریخ ایجاد' })
   createdAt!: Date;
 
-  @ApiProperty({ type: [TicketInInvoiceDto] })
+  @ApiProperty({ description: 'تاریخ بروزرسانی' })
+  updatedAt!: Date;
+
+  @ApiProperty({ type: [TicketInInvoiceDto], description: 'لیست بلیط‌های فاکتور' })
   tickets!: TicketInInvoiceDto[];
 
-  @ApiProperty({ type: BankCardInInvoiceDto })
+  @ApiProperty({ type: BankCardInInvoiceDto, description: 'اطلاعات کارت بانکی مقصد' })
   bankCard!: BankCardInInvoiceDto;
 
-  @ApiProperty({ required: false })
-  paymentId?: string;
+  @ApiProperty({ type: [PaymentInInvoiceDto], description: 'لیست پرداخت‌های انجام شده برای این فاکتور' })
+  payments!: PaymentInInvoiceDto[];
+
+  // ============ فیلدهای اختیاری ============
+  @ApiProperty({ description: 'شماره ثبت آژانس', nullable: true, required: false })
+  agencyRegistrationNumber?: string | null;
+
+  @ApiProperty({ description: 'تلفن آژانس', nullable: true, required: false })
+  agencyPhone?: string | null;
+
+  @ApiProperty({ description: 'آدرس آژانس', nullable: true, required: false })
+  agencyAddress?: string | null;
+
+  @ApiProperty({ description: 'مبلغ پرداخت شده (جمع کل پرداخت‌ها)', required: false })
+  paidAmount?: number;
+
+  @ApiProperty({ description: 'مبلغ باقی‌مانده', required: false })
+  remainingAmount?: number;
 }

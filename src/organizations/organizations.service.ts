@@ -1,3 +1,4 @@
+// src/organizations/organizations.service.ts
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateOrganizationDto, UpdateOrganizationDto } from './dto';
@@ -46,7 +47,6 @@ export class OrganizationsService {
   async create(adminId: string, dto: CreateOrganizationDto) {
     await this.validateSuperAdminAccess(adminId);
 
-    // Check if organization with same name or email exists
     const existing = await this.prisma.organization.findFirst({
       where: {
         OR: [
@@ -182,7 +182,6 @@ export class OrganizationsService {
       throw new NotFoundException('Organization not found');
     }
 
-    // If enabling panel for the first time
     const wasPanelEnabled = organization.hasPanel;
     const isPanelEnabled = dto.hasPanel === true;
 
@@ -239,12 +238,10 @@ export class OrganizationsService {
       throw new BadRequestException('Organization does not have a panel. Enable panel first.');
     }
 
-    // Check if organization already has an admin
     if (organization.users.length > 0) {
       throw new BadRequestException('Organization already has an admin. Update existing user instead.');
     }
 
-    // Check if user with this email exists
     const existingUser = await this.prisma.user.findUnique({
       where: { email },
     });
@@ -379,9 +376,9 @@ export class OrganizationsService {
               passengerName: true,
               passengerPhone: true,
               flightNumber: true,
-              origin: true,
-              destination: true,
-              flightDate: true,
+              // ✅ اصلاح: origin و destination حذف، route اضافه شد
+              route: true,
+              departureDate: true, // ✅ اصلاح: flightDate → departureDate
               seatClass: true,
               price: true,
             },
@@ -392,10 +389,13 @@ export class OrganizationsService {
               accountHolder: true,
             },
           },
-          payment: {
+          payments: {
             select: {
               trackingCode: true,
               paidAt: true,
+              amount: true,
+              paymentMethod: true,
+              status: true,
             },
           },
         },
@@ -433,7 +433,19 @@ export class OrganizationsService {
             email: true,
           },
         },
-        tickets: true,
+        tickets: {
+          select: {
+            ticketNumber: true,
+            passengerName: true,
+            passengerPhone: true,
+            flightNumber: true,
+            // ✅ اصلاح: origin و destination حذف، route اضافه شد
+            route: true,
+            departureDate: true, // ✅ اصلاح: flightDate → departureDate
+            seatClass: true,
+            price: true,
+          },
+        },
         bankCard: {
           select: {
             bankName: true,
@@ -441,7 +453,16 @@ export class OrganizationsService {
             sheba: true,
           },
         },
-        payment: true,
+        payments: {
+          select: {
+            id: true,
+            trackingCode: true,
+            paidAt: true,
+            amount: true,
+            paymentMethod: true,
+            status: true,
+          },
+        },
       },
     });
 
@@ -451,6 +472,7 @@ export class OrganizationsService {
 
     return invoice;
   }
+
 
   async getMyStats(organizationId: string, userId: string) {
     const { organization } = await this.validateOrganizationAccess(organizationId, userId);
@@ -470,7 +492,6 @@ export class OrganizationsService {
       .filter(i => i.status === InvoiceStatus.PAID)
       .reduce((sum, i) => sum + i.total, 0);
 
-    // Agency interactions
     const agencyMap = new Map<string, { agencyId: string; agencyName: string; invoiceCount: number; totalAmount: number; paidAmount: number }>();
     
     for (const invoice of invoices) {
@@ -498,7 +519,6 @@ export class OrganizationsService {
     const agencyInteractions = Array.from(agencyMap.values())
       .sort((a, b) => b.totalAmount - a.totalAmount);
 
-    // Monthly stats
     const monthlyMap = new Map<string, { invoiceCount: number; totalAmount: number }>();
     
     for (const invoice of invoices) {
@@ -557,7 +577,6 @@ export class OrganizationsService {
   async getAvailableAgencies(organizationId: string, userId: string) {
     await this.validateOrganizationAccess(organizationId, userId);
 
-    // Get all agencies that have issued invoices to this organization
     const agenciesWithInvoices = await this.prisma.invoice.findMany({
       where: { organizationId: organizationId },
       distinct: ['agencyId'],
@@ -578,30 +597,30 @@ export class OrganizationsService {
   }
 
   async searchOrganizations(q: string, limit: number = 10) {
-  if (!q || q.length < 2) {
-    return [];
+    if (!q || q.length < 2) {
+      return [];
+    }
+    
+    const organizations = await this.prisma.organization.findMany({
+      where: {
+        hasPanel: true,
+        OR: [
+          { name: { contains: q, mode: 'insensitive' } },
+          { nationalId: { contains: q, mode: 'insensitive' } },
+          { email: { contains: q, mode: 'insensitive' } },
+        ],
+      },
+      select: {
+        id: true,
+        name: true,
+        nationalId: true,
+        email: true,
+        phone: true,
+      },
+      take: limit,
+      orderBy: { name: 'asc' },
+    });
+    
+    return organizations;
   }
-  
-  const organizations = await this.prisma.organization.findMany({
-    where: {
-      hasPanel: true,
-      OR: [
-        { name: { contains: q, mode: 'insensitive' } },
-        { nationalId: { contains: q, mode: 'insensitive' } },
-        { email: { contains: q, mode: 'insensitive' } },
-      ],
-    },
-    select: {
-      id: true,
-      name: true,
-      nationalId: true,
-      email: true,
-      phone: true,
-    },
-    take: limit,
-    orderBy: { name: 'asc' },
-  });
-  
-  return organizations;
-}
 }

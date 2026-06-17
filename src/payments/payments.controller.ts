@@ -1,3 +1,4 @@
+// src/payments/payments.controller.ts
 import {
   Controller,
   Get,
@@ -11,6 +12,7 @@ import {
   ParseUUIDPipe,
   BadRequestException,
   ValidationPipe,
+  StreamableFile,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -33,9 +35,9 @@ export class PaymentsController {
 
   @Post()
   @Roles(UserRole.AGENCY_MANAGER, UserRole.GENERAL_MANAGER)
-  @ApiOperation({ summary: 'Register a payment for an invoice (Agency Manager or General Manager)' })
+  @ApiOperation({ summary: 'Register a payment for an invoice (supports partial payments)' })
   @ApiResponse({ status: 201, description: 'Payment registered successfully', type: PaymentResponseDto })
-  @ApiResponse({ status: 400, description: 'Invalid payment data or invoice already paid' })
+  @ApiResponse({ status: 400, description: 'Invalid payment data' })
   @ApiResponse({ status: 404, description: 'Invoice not found' })
   @ApiResponse({ status: 403, description: 'Access denied' })
   async create(
@@ -128,5 +130,40 @@ export class PaymentsController {
       throw new BadRequestException('Agency ID not found');
     }
     return this.paymentsService.delete(agencyId, userId, paymentId);
+  }
+
+  // ============ Cash Receipt Endpoints ============
+
+  @Get('cash-receipt/:receiptNumber')
+  @Roles(UserRole.AGENCY_MANAGER, UserRole.GENERAL_MANAGER)
+  @ApiOperation({ summary: 'Get a cash receipt by receipt number' })
+  @ApiResponse({ status: 200, description: 'Cash receipt details' })
+  @ApiResponse({ status: 404, description: 'Receipt not found' })
+  async getCashReceipt(
+    @CurrentUser('agencyId') agencyId: string,
+    @CurrentUser('id') userId: string,
+    @Param('receiptNumber') receiptNumber: string,
+  ) {
+    if (!agencyId) {
+      throw new BadRequestException('Agency ID not found');
+    }
+    return this.paymentsService.getCashReceipt(agencyId, userId, receiptNumber);
+  }
+
+  @Post(':paymentId/print-receipt')
+  @Roles(UserRole.AGENCY_MANAGER, UserRole.GENERAL_MANAGER)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Print cash receipt (mark as printed)' })
+  @ApiResponse({ status: 200, description: 'Receipt printed successfully' })
+  @ApiResponse({ status: 404, description: 'Payment or receipt not found' })
+  async printCashReceipt(
+    @CurrentUser('agencyId') agencyId: string,
+    @CurrentUser('id') userId: string,
+    @Param('paymentId', ParseUUIDPipe) paymentId: string,
+  ) {
+    if (!agencyId) {
+      throw new BadRequestException('Agency ID not found');
+    }
+    return this.paymentsService.printCashReceipt(agencyId, userId, paymentId);
   }
 }

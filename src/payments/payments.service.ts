@@ -1,7 +1,8 @@
+// src/payments/payments.service.ts
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreatePaymentDto } from './dto';
-import { InvoiceStatus, PaymentStatus, UserRole, AgencyStatus, BankCardStatus } from '@prisma/client';
+import { InvoiceStatus, PaymentStatus, UserRole, AgencyStatus, BankCardStatus, PaymentMethod } from '@prisma/client';
 
 @Injectable()
 export class PaymentsService {
@@ -41,6 +42,7 @@ export class PaymentsService {
     return user;
   }
 
+  // ✅ اصلاح شده: اضافه کردن tickets به include
   private async validateInvoiceForPayment(invoiceId: string, agencyId: string) {
     const invoice = await this.prisma.invoice.findFirst({
       where: {
@@ -49,6 +51,14 @@ export class PaymentsService {
       },
       include: {
         bankCard: true,
+        tickets: {           // ✅ اضافه شده
+          select: {
+            ticketNumber: true,
+          },
+        },
+        payments: {
+          where: { status: PaymentStatus.COMPLETED },
+        },
       },
     });
 
@@ -57,83 +67,131 @@ export class PaymentsService {
     }
 
     if (invoice.status === InvoiceStatus.PAID) {
-      throw new BadRequestException('Invoice is already paid');
+      throw new BadRequestException('Invoice is already fully paid');
     }
 
     if (invoice.status === InvoiceStatus.CANCELLED) {
       throw new BadRequestException('Cannot pay a cancelled invoice');
     }
 
-    // Validate bank card is still active
-    const bankCard = await this.prisma.bankCard.findFirst({
-      where: {
-        id: invoice.bankCardId,
-        agencyId: agencyId,
-        status: BankCardStatus.ACTIVE,
+    return invoice;
+  }
+
+  private async checkInvoiceFullyPaid(invoiceId: string, agencyId: string): Promise<boolean> {
+    const invoice = await this.prisma.invoice.findFirst({
+      where: { id: invoiceId, agencyId: agencyId },
+      include: {
+        payments: {
+          where: { status: PaymentStatus.COMPLETED },
+        },
       },
     });
 
-    if (!bankCard) {
-      throw new BadRequestException('The bank card on this invoice is no longer active');
-    }
+    if (!invoice) return false;
 
-    return invoice;
+    const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
+    return totalPaid >= invoice.total;
   }
 
   // ============ CRUD Operations ============
 
-  async create(agencyId: string, userId: string, dto: CreatePaymentDto) {
-    await this.validateAgencyManagerAccess(agencyId, userId, false);
+async create(agencyId: string, userId: string, dto: CreatePaymentDto) {
+  await this.validateAgencyManagerAccess(agencyId, userId, false);
 
-    // Validate invoice
-    const invoice = await this.validateInvoiceForPayment(dto.invoiceId, agencyId);
+  const invoice = await this.validateInvoiceForPayment(dto.invoiceId, agencyId);
 
-    // Validate amount
-    if (dto.amount !== invoice.total) {
-      throw new BadRequestException(`Payment amount must equal invoice total (${invoice.total})`);
+  const totalPaid = invoice.payments.reduce((sum, p) => sum + p.amount, 0);
+  const remainingAmount = invoice.total - totalPaid;
+
+  if (dto.amount <= 0) {
+    throw new BadRequestException('Payment amount must be greater than 0');
+  }
+
+  if (dto.amount > remainingAmount) {
+    throw new BadRequestException(
+      `Payment amount (${dto.amount.toLocaleString()}) exceeds remaining amount (${remainingAmount.toLocaleString()})`
+    );
+  }
+
+  if (dto.paymentMethod !== PaymentMethod.CASH && !dto.trackingCode) {
+    throw new BadRequestException('Tracking code is required for non-cash payments');
+  }
+
+  if (dto.trackingCode) {
+    const existing = await this.prisma.payment.findFirst({
+      where: { trackingCode: dto.trackingCode },
+    });
+    if (existing) {
+      throw new BadRequestException('Tracking code already exists');
+    }
+  }
+
+  let receiptNumber = dto.receiptNumber;
+  if (dto.paymentMethod === PaymentMethod.CASH && !receiptNumber) {
+    const count = await this.prisma.cashReceipt.count();
+    receiptNumber = `RCP-${new Date().getFullYear()}-${String(count + 1).padStart(6, '0')}`;
+  }
+
+  // 🔥 اضافه کردن currencyCode
+  const payment = await this.prisma.payment.create({
+    data: {
+      invoiceId: invoice.id,
+      agencyId: agencyId,
+      bankCardId: dto.paymentMethod !== PaymentMethod.CASH ? invoice.bankCardId : null,
+      amount: dto.amount,
+      paymentMethod: dto.paymentMethod,
+      trackingCode: dto.trackingCode || null,
+      receiptNumber: receiptNumber || null,
+      notes: dto.notes || null,
+      currencyCode: 'IRR', // 🔥 جدید
+      status: PaymentStatus.COMPLETED,
+      paidAt: new Date(),
+    },
+    include: {
+      invoice: {
+        select: {
+          invoiceNumber: true,
+        },
+      },
+      bankCard: {
+        select: {
+          bankName: true,
+          accountHolder: true,
+        },
+      },
+    },
+  });
+
+
+    // Create cash receipt if payment method is CASH
+    if (dto.paymentMethod === PaymentMethod.CASH && receiptNumber) {
+      const newRemaining = remainingAmount - dto.amount;
+      await this.prisma.cashReceipt.create({
+        data: {
+          paymentId: payment.id,
+          receiptNumber: receiptNumber,
+          customerName: invoice.customerName,
+          customerPhone: invoice.customerPhone,
+          ticketNumbers: invoice.tickets?.map(t => t.ticketNumber) || [], // ✅ الان کار می‌کند
+          totalAmount: invoice.total,
+          paidAmount: dto.amount,
+          remainingAmount: newRemaining,
+          paymentDate: new Date(),
+          printedAt: new Date(),
+          printedBy: userId,
+        },
+      });
     }
 
-    // Check if payment already exists for this invoice
-    const existingPayment = await this.prisma.payment.findUnique({
-      where: { invoiceId: invoice.id },
-    });
+    // Check if invoice is fully paid
+    const isFullyPaid = await this.checkInvoiceFullyPaid(invoice.id, agencyId);
 
-    if (existingPayment) {
-      throw new BadRequestException('A payment already exists for this invoice');
-    }
-
-    // Create payment
-    const payment = await this.prisma.payment.create({
-      data: {
-        invoiceId: invoice.id,
-        agencyId: agencyId,
-        bankCardId: invoice.bankCardId,
-        amount: dto.amount,
-        trackingCode: dto.trackingCode,
-        status: PaymentStatus.COMPLETED,
-        paidAt: new Date(),
-      },
-      include: {
-        invoice: {
-          select: {
-            invoiceNumber: true,
-          },
-        },
-        bankCard: {
-          select: {
-            bankName: true,
-            accountHolder: true,
-          },
-        },
-      },
-    });
-
-    // Update invoice status to PAID
+    // Update invoice status
     await this.prisma.invoice.update({
       where: { id: invoice.id },
       data: {
-        status: InvoiceStatus.PAID,
-        paidAt: new Date(),
+        status: isFullyPaid ? InvoiceStatus.PAID : InvoiceStatus.UNPAID,
+        paidAt: isFullyPaid ? new Date() : null,
       },
     });
 
@@ -145,7 +203,12 @@ export class PaymentsService {
         action: 'CREATE_PAYMENT',
         entityType: 'Payment',
         entityId: payment.id,
-        newData: { invoiceNumber: invoice.invoiceNumber, amount: dto.amount, trackingCode: dto.trackingCode },
+        newData: {
+          invoiceNumber: invoice.invoiceNumber,
+          amount: dto.amount,
+          paymentMethod: dto.paymentMethod,
+          trackingCode: dto.trackingCode,
+        },
       },
     });
 
@@ -163,7 +226,11 @@ export class PaymentsService {
             action: 'ORGANIZATION_PAYMENT_RECEIVED',
             entityType: 'Payment',
             entityId: payment.id,
-            newData: { invoiceNumber: invoice.invoiceNumber, amount: dto.amount },
+            newData: {
+              invoiceNumber: invoice.invoiceNumber,
+              amount: dto.amount,
+              remainingAmount: remainingAmount - dto.amount,
+            },
           },
         });
       }
@@ -175,14 +242,19 @@ export class PaymentsService {
       invoiceNumber: payment.invoice.invoiceNumber,
       agencyId: payment.agencyId,
       bankCardId: payment.bankCardId,
-      bankName: payment.bankCard.bankName,
+      bankName: payment.bankCard?.bankName || 'نقدی',
       amount: payment.amount,
+      paymentMethod: payment.paymentMethod,
       trackingCode: payment.trackingCode,
+      receiptNumber: payment.receiptNumber,
+      notes: payment.notes,
       status: payment.status,
       paidAt: payment.paidAt,
       createdAt: payment.createdAt,
+      remainingAmount: remainingAmount - dto.amount,
     };
   }
+
 
   async findAll(
     agencyId: string,
@@ -243,6 +315,7 @@ export class PaymentsService {
               accountHolder: true,
             },
           },
+          cashReceipt: true,
         },
       }),
       this.prisma.payment.count({ where }),
@@ -255,12 +328,16 @@ export class PaymentsService {
         invoiceNumber: payment.invoice.invoiceNumber,
         customerName: payment.invoice.customerName,
         amount: payment.amount,
+        paymentMethod: payment.paymentMethod,
         trackingCode: payment.trackingCode,
+        receiptNumber: payment.receiptNumber,
+        notes: payment.notes,
         status: payment.status,
-        bankName: payment.bankCard.bankName,
+        bankName: payment.bankCard?.bankName || 'نقدی',
         paidAt: payment.paidAt,
         createdAt: payment.createdAt,
         tickets: payment.invoice.tickets,
+        cashReceipt: payment.cashReceipt,
       })),
       meta: {
         page,
@@ -294,6 +371,7 @@ export class PaymentsService {
             sheba: true,
           },
         },
+        cashReceipt: true,
       },
     });
 
@@ -332,7 +410,6 @@ export class PaymentsService {
           },
         },
       }),
-      // Using Prisma's groupBy instead of raw SQL for better type safety
       this.prisma.payment.groupBy({
         by: ['paidAt'],
         where: {
@@ -353,7 +430,6 @@ export class PaymentsService {
       }),
     ]);
 
-    // Process monthly stats from the results
     const monthlyStatsProcessed = monthlyStats.map(stat => ({
       month: stat.paidAt ? new Date(stat.paidAt).toISOString().slice(0, 7) : null,
       count: stat._count,
@@ -369,6 +445,7 @@ export class PaymentsService {
         invoiceNumber: p.invoice.invoiceNumber,
         customerName: p.invoice.customerName,
         amount: p.amount,
+        paymentMethod: p.paymentMethod,
         trackingCode: p.trackingCode,
         paidAt: p.paidAt,
       })),
@@ -386,6 +463,7 @@ export class PaymentsService {
       },
       include: {
         invoice: true,
+        cashReceipt: true,
       },
     });
 
@@ -399,16 +477,42 @@ export class PaymentsService {
       throw new BadRequestException('Cannot reverse payments older than 30 days');
     }
 
-    // Reverse payment: update invoice back to UNPAID
-    await this.prisma.invoice.update({
-      where: { id: payment.invoiceId },
-      data: {
-        status: InvoiceStatus.UNPAID,
-        paidAt: null,
+    // Delete cash receipt if exists
+    if (payment.cashReceipt) {
+      await this.prisma.cashReceipt.delete({
+        where: { id: payment.cashReceipt.id },
+      });
+    }
+
+    // Delete payment
+    await this.prisma.payment.delete({ where: { id: paymentId } });
+
+    // Check if invoice has other payments
+    const otherPayments = await this.prisma.payment.findMany({
+      where: {
+        invoiceId: payment.invoiceId,
+        status: PaymentStatus.COMPLETED,
+        id: { not: paymentId },
       },
     });
 
-    await this.prisma.payment.delete({ where: { id: paymentId } });
+    // Update invoice status based on remaining payments
+    const invoice = await this.prisma.invoice.findUnique({
+      where: { id: payment.invoiceId },
+    });
+
+    if (invoice) {
+      const totalPaid = otherPayments.reduce((sum, p) => sum + p.amount, 0);
+      const isFullyPaid = totalPaid >= invoice.total;
+
+      await this.prisma.invoice.update({
+        where: { id: payment.invoiceId },
+        data: {
+          status: isFullyPaid ? InvoiceStatus.PAID : InvoiceStatus.UNPAID,
+          paidAt: isFullyPaid ? new Date() : null,
+        },
+      });
+    }
 
     await this.prisma.activityLog.create({
       data: {
@@ -426,5 +530,68 @@ export class PaymentsService {
       invoiceId: payment.invoiceId,
       reversedAmount: payment.amount,
     };
+  }
+
+  // ============ Cash Receipt Methods ============
+
+  async getCashReceipt(agencyId: string, userId: string, receiptNumber: string) {
+    await this.validateAgencyManagerAccess(agencyId, userId, false);
+
+    const receipt = await this.prisma.cashReceipt.findFirst({
+      where: {
+        receiptNumber: receiptNumber,
+        payment: {
+          agencyId: agencyId,
+        },
+      },
+      include: {
+        payment: {
+          include: {
+            invoice: true,
+          },
+        },
+      },
+    });
+
+    if (!receipt) {
+      throw new NotFoundException('Cash receipt not found');
+    }
+
+    return receipt;
+  }
+
+  async printCashReceipt(agencyId: string, userId: string, paymentId: string) {
+    await this.validateAgencyManagerAccess(agencyId, userId, false);
+
+    const payment = await this.prisma.payment.findFirst({
+      where: {
+        id: paymentId,
+        agencyId: agencyId,
+        paymentMethod: PaymentMethod.CASH,
+      },
+      include: {
+        cashReceipt: true,
+        invoice: true,
+      },
+    });
+
+    if (!payment) {
+      throw new NotFoundException('Cash payment not found');
+    }
+
+    if (!payment.cashReceipt) {
+      throw new NotFoundException('Cash receipt not found for this payment');
+    }
+
+    // Update printed status
+    const receipt = await this.prisma.cashReceipt.update({
+      where: { id: payment.cashReceipt.id },
+      data: {
+        printedAt: new Date(),
+        printedBy: userId,
+      },
+    });
+
+    return receipt;
   }
 }

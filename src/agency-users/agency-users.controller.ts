@@ -40,19 +40,24 @@ export class AgencyUsersController {
   @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
   @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiQuery({ name: 'role', required: false, enum: UserRole })
   async findAll(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') currentUserId: string,
+    @CurrentUser('role') userRole: UserRole,  // 🔥 اضافه شد
     @Query('page') page?: string,
     @Query('limit') limit?: string,
     @Query('search') search?: string,
+    @Query('role') role?: UserRole,  // 🔥 اضافه شد
   ) {
     return this.agencyUsersService.findAll(
       agencyId,
       currentUserId,
+      userRole,  // 🔥 اضافه شد
       page ? parseInt(page) : 1,
       limit ? parseInt(limit) : 20,
       search,
+      role,  // 🔥 اضافه شد
     );
   }
 
@@ -61,9 +66,10 @@ export class AgencyUsersController {
   async findOne(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') currentUserId: string,
+    @CurrentUser('role') userRole: UserRole,  // 🔥 اضافه شد
     @Param('userId') userId: string,
   ) {
-    return this.agencyUsersService.findOne(agencyId, currentUserId, userId);
+    return this.agencyUsersService.findOne(agencyId, currentUserId, userRole, userId);
   }
 
   @Get(':userId/penalties')
@@ -71,9 +77,10 @@ export class AgencyUsersController {
   async getUserPenalties(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') currentUserId: string,
+    @CurrentUser('role') userRole: UserRole,  // 🔥 اضافه شد
     @Param('userId') userId: string,
   ) {
-    return this.agencyUsersService.getUserPenalties(agencyId, currentUserId, userId);
+    return this.agencyUsersService.getUserPenalties(agencyId, currentUserId, userRole, userId);
   }
 
   @Post()
@@ -82,9 +89,10 @@ export class AgencyUsersController {
   async create(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') currentUserId: string,
+    @CurrentUser('role') userRole: UserRole,  // 🔥 اضافه شد
     @Body() dto: CreateAgencyUserDto,
   ) {
-    return this.agencyUsersService.create(agencyId, currentUserId, dto);
+    return this.agencyUsersService.create(agencyId, currentUserId, userRole, dto);
   }
 
   @Patch(':userId')
@@ -92,10 +100,11 @@ export class AgencyUsersController {
   async update(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') currentUserId: string,
+    @CurrentUser('role') userRole: UserRole,  // 🔥 اضافه شد
     @Param('userId') userId: string,
     @Body() dto: UpdateAgencyUserDto,
   ) {
-    return this.agencyUsersService.update(agencyId, currentUserId, userId, dto);
+    return this.agencyUsersService.update(agencyId, currentUserId, userRole, userId, dto);
   }
 
   @Patch(':userId/status')
@@ -104,10 +113,11 @@ export class AgencyUsersController {
   async changeStatus(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') currentUserId: string,
+    @CurrentUser('role') userRole: UserRole,  // 🔥 اضافه شد
     @Param('userId') userId: string,
     @Body('status') status: UserStatus,
   ) {
-    return this.agencyUsersService.changeStatus(agencyId, currentUserId, userId, status);
+    return this.agencyUsersService.changeStatus(agencyId, currentUserId, userRole, userId, status);
   }
 
   @Delete(':userId')
@@ -116,8 +126,9 @@ export class AgencyUsersController {
   async delete(
     @CurrentUser('agencyId') agencyId: string,
     @CurrentUser('id') currentUserId: string,
+    @CurrentUser('role') userRole: UserRole,  // 🔥 اضافه شد
     @Param('userId') userId: string,
   ) {
-    return this.agencyUsersService.delete(agencyId, currentUserId, userId);
+    return this.agencyUsersService.delete(agencyId, currentUserId, userRole, userId);
   }
 }

@@ -53,87 +53,104 @@ export class AgenciesService {
     if (!input) return input;
     return input.trim().replace(/[<>]/g, '');
   }
+  // 🔥 متد اعتبارسنجی IATA Code
+  private async validateIATACode(iataCode: string, excludeAgencyId?: string): Promise<void> {
+    if (!iataCode) return;
 
-async create(dto: CreateAgencyDto , adminId?: string) {
-  // Check if agency with same name or email already exists
-  const existingAgency = await this.prisma.agency.findFirst({
-    where: {
-      OR: [
-        { name: dto.name },
-        ...(dto.email ? [{ email: dto.email }] : []),
-        ...(dto.registrationNumber ? [{ registrationNumber: dto.registrationNumber }] : []),
-      ],
-    },
-  });
+    // بررسی فرمت IATA (2 کاراکتر حرف و 3 عدد)
+    const iataRegex = /^[A-Z]{2}\d{3}$/;
+    if (!iataRegex.test(iataCode)) {
+      throw new BadRequestException(
+        'Invalid IATA code format. Must be 2 letters followed by 3 digits (e.g., TP001)'
+      );
+    }
 
-  if (existingAgency) {
-    throw new ConflictException('Agency with this name, email, or registration number already exists');
+    // بررسی یکتایی
+    const existing = await this.prisma.agency.findFirst({
+      where: {
+        iataCode,
+        id: excludeAgencyId ? { not: excludeAgencyId } : undefined,
+      },
+    });
+
+    if (existing) {
+      throw new ConflictException(`IATA code ${iataCode} is already assigned to another agency`);
+    }
   }
 
-  // Create agency
-  const agency = await this.prisma.agency.create({
-    data: {
-      name: this.sanitizeString(dto.name),
-      registrationNumber: dto.registrationNumber ? this.sanitizeString(dto.registrationNumber) : null,
-      phone: dto.phone ? this.sanitizeString(dto.phone) : null,
-      email: dto.email ? this.sanitizeString(dto.email) : null,
-      address: dto.address ? this.sanitizeString(dto.address) : null,
-      status: dto.status || AgencyStatus.TRIAL,
-      trialExpiresAt: dto.trialExpiresAt,
-    },
-  });
+  async create(dto: CreateAgencyDto, adminId?: string) {
+    // 🔥 اعتبارسنجی IATA Code
+    if (dto.iataCode) {
+      await this.validateIATACode(dto.iataCode);
+    }
 
-  // Create General Manager user for the agency
-  const temporaryPassword = this.generateTemporaryPassword();
-  const hashedPassword = await bcrypt.hash(temporaryPassword, 10);
+    const existingAgency = await this.prisma.agency.findFirst({
+      where: {
+        OR: [
+          { name: dto.name },
+          ...(dto.email ? [{ email: dto.email }] : []),
+          ...(dto.registrationNumber ? [{ registrationNumber: dto.registrationNumber }] : []),
+        ],
+      },
+    });
 
-  const contactName = dto.contactName || 'مدیر کل';
-  const firstName = contactName.split(' ')[0] || 'مدیر';
-  const lastName = contactName.split(' ')[1] || 'کل';
+    if (existingAgency) {
+      throw new ConflictException('Agency with this name, email, or registration number already exists');
+    }
 
-  const generalManager = await this.prisma.user.create({
-    data: {
-      email: dto.email || `${agency.name.replace(/\s/g, '').toLowerCase()}@agency.com`,
-      passwordHash: hashedPassword,
-      firstName: this.sanitizeString(firstName),
-      lastName: this.sanitizeString(lastName),
-      phone: dto.phone || null,
-      role: UserRole.GENERAL_MANAGER,
-      agencyId: agency.id,
-      status: UserStatus.ACTIVE,
-    },
-    select: {
-      id: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      role: true,
-      status: true,
-    },
-  });
+    // Create agency with iataCode
+    const agency = await this.prisma.agency.create({
+      data: {
+        name: this.sanitizeString(dto.name),
+        registrationNumber: dto.registrationNumber ? this.sanitizeString(dto.registrationNumber) : null,
+        phone: dto.phone ? this.sanitizeString(dto.phone) : null,
+        email: dto.email ? this.sanitizeString(dto.email) : null,
+        address: dto.address ? this.sanitizeString(dto.address) : null,
+        iataCode: dto.iataCode ? this.sanitizeString(dto.iataCode).toUpperCase() : null, // 🔥 تبدیل به حروف بزرگ
+        status: dto.status || AgencyStatus.TRIAL,
+        trialExpiresAt: dto.trialExpiresAt,
+      },
+    });
 
-  // Log activity - حذف شده یا با userId معتبر جایگزین کنید
-  // اگر می‌خواهید لاگ داشته باشید، باید userId واقعی (مثلاً از JWT) دریافت کنید
-  // فعلاً این بخش را کامنت می‌کنیم تا خطا ندهد
-  
-  // await this.prisma.activityLog.create({
-  //   data: {
-  //     userId: 'system', // این خط مشکل دارد چون کاربر 'system' وجود ندارد
-  //     agencyId: agency.id,
-  //     action: 'CREATE_AGENCY_WITH_MANAGER',
-  //     entityType: 'Agency',
-  //     entityId: agency.id,
-  //     newData: { agencyName: agency.name, managerEmail: generalManager.email },
-  //   },
-  // });
 
-  return {
-    agency,
-    generalManager,
-    temporaryPassword,
-    message: `Agency created successfully. General Manager password: ${temporaryPassword}`,
-  };
-}
+    // Create General Manager user for the agency
+    const temporaryPassword = this.generateTemporaryPassword();
+    const hashedPassword = await bcrypt.hash(temporaryPassword, 10);
+
+    const contactName = dto.contactName || 'مدیر کل';
+    const firstName = contactName.split(' ')[0] || 'مدیر';
+    const lastName = contactName.split(' ')[1] || 'کل';
+
+    const generalManager = await this.prisma.user.create({
+      data: {
+        email: dto.email || `${agency.name.replace(/\s/g, '').toLowerCase()}@agency.com`,
+        passwordHash: hashedPassword,
+        firstName: this.sanitizeString(firstName),
+        lastName: this.sanitizeString(lastName),
+        phone: dto.phone || null,
+        role: UserRole.GENERAL_MANAGER,
+        agencyId: agency.id,
+        status: UserStatus.ACTIVE,
+        agentIATACode: null, // 🔥 جدید
+      },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        status: true,
+      },
+    });
+
+    return {
+      agency,
+      generalManager,
+      temporaryPassword,
+      message: `Agency created successfully. General Manager password: ${temporaryPassword}`,
+    };
+  }
+
   async findAll(
     page: number = 1,
     limit: number = 20,
@@ -247,6 +264,11 @@ async create(dto: CreateAgencyDto , adminId?: string) {
   async update(id: string, dto: UpdateAgencyDto) {
     await this.findOne(id);
 
+    // 🔥 اعتبارسنجی IATA Code در صورت تغییر
+    if (dto.iataCode) {
+      await this.validateIATACode(dto.iataCode, id);
+    }
+
     // If changing email, check for uniqueness
     if (dto.email) {
       const existing = await this.prisma.agency.findFirst({
@@ -270,6 +292,7 @@ async create(dto: CreateAgencyDto , adminId?: string) {
         address: dto.address ? this.sanitizeString(dto.address) : undefined,
         status: dto.status,
         trialExpiresAt: dto.trialExpiresAt,
+        iataCode: dto.iataCode ? this.sanitizeString(dto.iataCode).toUpperCase() : undefined,
       },
     });
 

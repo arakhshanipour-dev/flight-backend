@@ -1,44 +1,49 @@
+// src/agencies/dto/create-agency.dto.ts
 import { ApiProperty } from '@nestjs/swagger';
-import { IsString, IsEmail, IsOptional, MinLength, MaxLength, IsEnum } from 'class-validator';
+import { IsString, IsOptional, IsEmail, IsEnum, IsDateString } from 'class-validator';
 import { AgencyStatus } from '@prisma/client';
 
 export class CreateAgencyDto {
-  @ApiProperty({ example: 'آژانس هواپیمایی البرز', description: 'نام آژانس' })
+  @ApiProperty({ example: 'آژانس سفر پلاس' })
   @IsString()
-  @MinLength(3)
-  @MaxLength(100)
   name!: string;
 
-  @ApiProperty({ example: '1234567890', required: false, description: 'شماره ثبت/کد اقتصادی' })
+  @ApiProperty({ required: false, example: 'REG-14031234' })
   @IsString()
   @IsOptional()
   registrationNumber?: string;
 
-  @ApiProperty({ example: '+982188776655', required: false })
+  @ApiProperty({ required: false, example: '021-88551234' })
   @IsString()
   @IsOptional()
   phone?: string;
 
-  @ApiProperty({ example: 'info@alborzagency.com', required: false })
+  @ApiProperty({ required: false, example: 'info@travelplus.ir' })
   @IsEmail()
   @IsOptional()
   email?: string;
 
-  @ApiProperty({ example: 'تهران، خیابان آزادی، پلاک ۱۲۳', required: false })
+  @ApiProperty({ required: false, example: 'تهران، خیابان ولیعصر، پلاک ۱۲۳۴' })
   @IsString()
   @IsOptional()
   address?: string;
 
-  @ApiProperty({ enum: AgencyStatus, default: AgencyStatus.TRIAL, required: false })
+  @ApiProperty({ required: false, example: 'TP001', description: 'کد IATA آژانس' })
+  @IsString()
+  @IsOptional()
+  iataCode?: string;  // 🔥 جدید
+
+  @ApiProperty({ enum: AgencyStatus, default: AgencyStatus.TRIAL })
   @IsEnum(AgencyStatus)
   @IsOptional()
   status?: AgencyStatus;
 
-  @ApiProperty({ example: '2025-01-15T00:00:00Z', required: false, description: 'تاریخ انقضای دمو' })
+  @ApiProperty({ required: false, example: '2025-12-31T23:59:59Z' })
+  @IsDateString()
   @IsOptional()
-  trialExpiresAt?: Date;
+  trialExpiresAt?: string;
 
-  @ApiProperty({ example: 'علی رضایی', required: false, description: 'نام شخص تماس (مدیر کل)' })
+  @ApiProperty({ required: false, example: 'علی رضایی', description: 'نام مدیر کل' })
   @IsString()
   @IsOptional()
   contactName?: string;

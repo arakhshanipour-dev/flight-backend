@@ -1,3 +1,4 @@
+// src/tickets/tickets.service.ts
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PlansService } from '../plans/plans.service';
@@ -59,6 +60,8 @@ export class TicketsService {
         invoice: {
           select: { invoiceNumber: true, status: true },
         },
+        originAirport: true,
+        destinationAirport: true,
       },
     });
 
@@ -73,71 +76,147 @@ export class TicketsService {
     return ticket;
   }
 
-  private checkRequiredFields(ticket: any, dto: UpdateTicketDto): string[] {
-    const missingFields: string[] = [];
-    if (!ticket.passengerName && !dto.passengerName) missingFields.push('نام مسافر');
-    if (!ticket.passengerPhone && !dto.passengerPhone) missingFields.push('شماره تماس');
-    if (!ticket.flightNumber && !dto.flightNumber) missingFields.push('شماره پرواز');
-    if (!ticket.origin && !dto.origin) missingFields.push('مبدأ');
-    if (!ticket.destination && !dto.destination) missingFields.push('مقصد');
-    if (!ticket.flightDate && !dto.flightDate) missingFields.push('تاریخ پرواز');
-    if (!ticket.seatClass && !dto.seatClass) missingFields.push('کلاس پرواز');
-    if ((!ticket.price || ticket.price === 0) && (!dto.price || dto.price === 0)) missingFields.push('قیمت');
-    return missingFields;
-  }
+private checkRequiredFields(ticket: any, dto: UpdateTicketDto): string[] {
+  const missingFields: string[] = [];
+  if (!ticket.passengerName && !dto.passengerName) missingFields.push('نام مسافر');
+  if (!ticket.passengerPhone && !dto.passengerPhone) missingFields.push('شماره تماس');
+  if (!ticket.flightNumber && !dto.flightNumber) missingFields.push('شماره پرواز');
+  // 🔥 اصلاح: استفاده از route به جای origin و destination
+  if (!ticket.route && !dto.route) missingFields.push('مسیر');
+  if (!ticket.flightDate && !dto.flightDate) missingFields.push('تاریخ پرواز');
+  if (!ticket.seatClass && !dto.seatClass) missingFields.push('کلاس پرواز');
+  if ((!ticket.price || ticket.price === 0) && (!dto.price || dto.price === 0)) missingFields.push('قیمت');
+  return missingFields;
+}
 
   private sanitizeString(input: string): string {
     if (!input) return input;
     return input.trim().replace(/[<>]/g, '');
   }
 
-  async create(agencyId: string, userId: string, dto: CreateTicketDto) {
-    await this.validateAgencyAccess(agencyId, userId, UserRole.NORMAL_USER);
-    await this.plansService.checkTicketLimit(agencyId);
+  // ============ CREATE ============
+// ============ CREATE ============
+async create(agencyId: string, userId: string, dto: CreateTicketDto) {
+  await this.validateAgencyAccess(agencyId, userId, UserRole.NORMAL_USER);
+  await this.plansService.checkTicketLimit(agencyId);
 
-    const existingTicket = await this.prisma.ticket.findFirst({
-      where: {
-        agencyId: agencyId,
-        ticketNumber: dto.ticketNumber,
-      },
-    });
+  const existingTicket = await this.prisma.ticket.findFirst({
+    where: {
+      agencyId: agencyId,
+      ticketNumber: dto.ticketNumber,
+    },
+  });
 
-    if (existingTicket) {
-      throw new BadRequestException(`❌ شماره بلیط ${dto.ticketNumber} قبلاً در این آژانس ثبت شده است`);
-    }
-
-    const ticket = await this.prisma.ticket.create({
-      data: {
-        ticketNumber: dto.ticketNumber,
-        referenceNumber: dto.referenceNumber,
-        agencyId: agencyId,
-        userId: userId,
-        passengerName: this.sanitizeString(dto.passengerName),
-        passengerPhone: this.sanitizeString(dto.passengerPhone),
-        flightNumber: this.sanitizeString(dto.flightNumber),
-        origin: this.sanitizeString(dto.origin),
-        destination: this.sanitizeString(dto.destination),
-        flightDate: new Date(dto.flightDate),
-        seatClass: this.sanitizeString(dto.seatClass),
-        price: dto.price,
-        status: TicketStatus.DRAFT,
-      },
-    });
-
-    await this.prisma.activityLog.create({
-      data: {
-        userId: userId,
-        agencyId: agencyId,
-        action: 'CREATE_TICKET',
-        entityType: 'Ticket',
-        entityId: ticket.id,
-        newData: { ticketNumber: dto.ticketNumber },
-      },
-    });
-
-    return ticket;
+  if (existingTicket) {
+    throw new BadRequestException(`❌ شماره بلیط ${dto.ticketNumber} قبلاً در این آژانس ثبت شده است`);
   }
 
+  // محاسبه commissionAmount اگر وارد نشده باشد
+  let commissionAmount = dto.commissionAmount || 0;
+  if (dto.commission && dto.fare && !dto.commissionAmount) {
+    commissionAmount = (dto.fare * dto.commission) / 100;
+  }
+
+  // محاسبه price اگر وارد نشده باشد
+  let price = dto.price;
+  if (!price) {
+    price = (dto.fare || 0) + (dto.fee || 0) + (dto.tax || 0) + (dto.vat || 0) + (dto.ancillary || 0) - (dto.discount || 0);
+  }
+
+  // 🔥 اصلاح: اگر departureDate وارد نشده، از flightDate استفاده کن
+  const departureDate = dto.departureDate 
+    ? new Date(dto.departureDate) 
+    : new Date(dto.flightDate);
+
+  const ticket = await this.prisma.ticket.create({
+    data: {
+      ticketNumber: dto.ticketNumber,
+      referenceNumber: dto.referenceNumber,
+      agencyId: agencyId,
+      userId: userId,
+      
+      // اطلاعات مسافر
+      passengerName: this.sanitizeString(dto.passengerName),
+      passengerPhone: this.sanitizeString(dto.passengerPhone),
+      passengerTitle: dto.passengerTitle,
+      nationality: dto.nationality,
+      nationalCode: dto.nationalCode,
+      passportNumber: dto.passportNumber,
+      reservationPhone: dto.reservationPhone,
+      ageType: dto.ageType,
+      gender: dto.gender,
+      
+      // اطلاعات پرواز
+      flightNumber: this.sanitizeString(dto.flightNumber),
+      // ❌ حذف: flightDate: new Date(dto.flightDate),
+      departureDate: departureDate,  // ✅ فقط departureDate
+      seatClass: this.sanitizeString(dto.seatClass),
+      route: dto.route,
+      segment: dto.segment,
+      
+      // اطلاعات رزرو
+      pnr: dto.pnr,
+      tourCode: dto.tourCode,
+      source: dto.source,
+      customerAirline: dto.customerAirline,
+      sign: dto.sign,
+      
+      // اطلاعات مالی
+      currencyCode: dto.currencyCode || 'IRR',
+      fare: dto.fare || 0,
+      fee: dto.fee || 0,
+      tax: dto.tax || 0,
+      vat: dto.vat || 0,
+      ancillary: dto.ancillary || 0,
+      discount: dto.discount || 0,
+      price: price,
+      
+      // کارمزد و مارک‌آپ
+      commission: dto.commission || 0,
+      commissionAmount: commissionAmount,
+      markup: dto.markup || 0,
+      
+      // فروش و حسابداری
+      salesType: dto.salesType || 'STANDARD',
+      transactionType: dto.transactionType,
+      transactionDate: dto.transactionDate ? new Date(dto.transactionDate) : undefined,
+      referenceNo: dto.referenceNo,
+      debit: dto.debit,
+      credit: dto.credit,
+      runningBalance: dto.runningBalance,
+      totalRefund: dto.totalRefund,
+      
+      // فروشنده
+      agentName: dto.agentName,
+      agentCode: dto.agentCode,
+      agentIATACode: dto.agentIATACode,
+      
+      // روابط فرودگاه
+      originAirportId: dto.originAirportId,
+      destinationAirportId: dto.destinationAirportId,
+      
+      status: dto.status || TicketStatus.DRAFT,
+    },
+  });
+
+  await this.prisma.activityLog.create({
+    data: {
+      userId: userId,
+      agencyId: agencyId,
+      action: 'CREATE_TICKET',
+      entityType: 'Ticket',
+      entityId: ticket.id,
+      newData: { 
+        ticketNumber: dto.ticketNumber,
+        pnr: dto.pnr,
+        route: dto.route,
+      },
+    },
+  });
+
+  return ticket;
+}
+  // ============ FIND ALL ============
   async findAll(
     agencyId: string,
     userId: string,
@@ -170,6 +249,8 @@ export class TicketsService {
         { passengerName: { contains: sanitizedSearch, mode: 'insensitive' } },
         { passengerPhone: { contains: sanitizedSearch, mode: 'insensitive' } },
         { flightNumber: { contains: sanitizedSearch, mode: 'insensitive' } },
+        { pnr: { contains: sanitizedSearch, mode: 'insensitive' } },
+        { route: { contains: sanitizedSearch, mode: 'insensitive' } },
       ];
     }
 
@@ -195,6 +276,9 @@ export class TicketsService {
               status: true,
             },
           },
+          originAirport: true,
+          destinationAirport: true,
+          penalties: true,
         },
       }),
       this.prisma.ticket.count({ where }),
@@ -211,6 +295,7 @@ export class TicketsService {
     };
   }
 
+  // ============ FIND ONE ============
   async findOne(agencyId: string, userId: string, userRole: UserRole, ticketId: string) {
     await this.validateAgencyAccess(agencyId, userId);
 
@@ -244,6 +329,8 @@ export class TicketsService {
           },
         },
         penalties: true,
+        originAirport: true,
+        destinationAirport: true,
       },
     });
 
@@ -254,85 +341,136 @@ export class TicketsService {
     return ticket;
   }
 
-  async update(agencyId: string, userId: string, userRole: UserRole, ticketId: string, dto: UpdateTicketDto) {
-    const ticket = await this.getTicketWithAccess(ticketId, agencyId, userId, userRole === UserRole.NORMAL_USER);
+// ============ UPDATE ============
+async update(agencyId: string, userId: string, userRole: UserRole, ticketId: string, dto: UpdateTicketDto) {
+  const ticket = await this.getTicketWithAccess(ticketId, agencyId, userId, userRole === UserRole.NORMAL_USER);
 
-    if (ticket.status === TicketStatus.INVOICED) {
-      throw new BadRequestException('❌ این بلیط قبلاً فاکتور شده است و قابل ویرایش نیست');
-    }
-
-    if (ticket.status === TicketStatus.FINALIZED && userRole === UserRole.NORMAL_USER) {
-      throw new BadRequestException('❌ این بلیط نهایی شده است. برای ویرایش، ابتدا درخواست باز کردن بلیط را ثبت کنید');
-    }
-
-    let newStatus = dto.status || ticket.status;
-
-    if (userRole === UserRole.NORMAL_USER) {
-      if (dto.status === TicketStatus.COMPLETED) {
-        const missingFields = this.checkRequiredFields(ticket, dto);
-        if (missingFields.length > 0) {
-          throw new BadRequestException(`⚠️ برای تکمیل بلیط، فیلدهای زیر باید پر شوند:\n${missingFields.join('، ')}`);
-        }
-        newStatus = TicketStatus.COMPLETED;
-      } 
-      else if (dto.status === TicketStatus.FINALIZED) {
-        if (ticket.status !== TicketStatus.COMPLETED) {
-          throw new BadRequestException('⚠️ بلیط ابتدا باید تکمیل شود (وضعیت COMPLETED)، سپس می‌توانید آن را نهایی کنید');
-        }
-        newStatus = TicketStatus.FINALIZED;
-      }
-      else if (dto.status && dto.status !== ticket.status) {
-        throw new BadRequestException('❌ شما فقط می‌توانید وضعیت بلیط را به "تکمیل شده" یا "نهایی شده" تغییر دهید');
-      }
-    }
-
-    if (userRole !== UserRole.NORMAL_USER && dto.status === TicketStatus.FINALIZED) {
-      if (ticket.status !== TicketStatus.COMPLETED && ticket.status !== TicketStatus.FINALIZED) {
-        throw new BadRequestException('⚠️ بلیط باید در وضعیت COMPLETED باشد تا بتوان آن را نهایی کرد');
-      }
-    }
-
-    const updateData: any = {
-      ticketNumber: dto.ticketNumber ? this.sanitizeString(dto.ticketNumber) : undefined,
-      referenceNumber: dto.referenceNumber ? this.sanitizeString(dto.referenceNumber) : undefined,
-      passengerName: dto.passengerName ? this.sanitizeString(dto.passengerName) : undefined,
-      passengerPhone: dto.passengerPhone ? this.sanitizeString(dto.passengerPhone) : undefined,
-      flightNumber: dto.flightNumber ? this.sanitizeString(dto.flightNumber) : undefined,
-      origin: dto.origin ? this.sanitizeString(dto.origin) : undefined,
-      destination: dto.destination ? this.sanitizeString(dto.destination) : undefined,
-      seatClass: dto.seatClass ? this.sanitizeString(dto.seatClass) : undefined,
-      price: dto.price,
-      status: newStatus,
-    };
-
-    if (dto.flightDate) {
-      updateData.flightDate = new Date(dto.flightDate);
-    }
-
-    if (newStatus === TicketStatus.FINALIZED && ticket.status !== TicketStatus.FINALIZED) {
-      updateData.finalizedAt = new Date();
-    }
-
-    const updatedTicket = await this.prisma.ticket.update({
-      where: { id: ticketId },
-      data: updateData,
-    });
-
-    await this.prisma.activityLog.create({
-      data: {
-        userId: userId,
-        agencyId: agencyId,
-        action: 'UPDATE_TICKET',
-        entityType: 'Ticket',
-        entityId: ticketId,
-        oldData: { oldStatus: ticket.status },
-        newData: { newStatus: updatedTicket.status },
-      },
-    });
-
-    return updatedTicket;
+  if (ticket.status === TicketStatus.INVOICED) {
+    throw new BadRequestException('❌ این بلیط قبلاً فاکتور شده است و قابل ویرایش نیست');
   }
 
+  if (ticket.status === TicketStatus.FINALIZED && userRole === UserRole.NORMAL_USER) {
+    throw new BadRequestException('❌ این بلیط نهایی شده است. برای ویرایش، ابتدا درخواست باز کردن بلیط را ثبت کنید');
+  }
+
+  let newStatus = dto.status || ticket.status;
+
+  if (userRole === UserRole.NORMAL_USER) {
+    if (dto.status === TicketStatus.COMPLETED) {
+      const missingFields = this.checkRequiredFields(ticket, dto);
+      if (missingFields.length > 0) {
+        throw new BadRequestException(`⚠️ برای تکمیل بلیط، فیلدهای زیر باید پر شوند:\n${missingFields.join('، ')}`);
+      }
+      newStatus = TicketStatus.COMPLETED;
+    } 
+    else if (dto.status === TicketStatus.FINALIZED) {
+      if (ticket.status !== TicketStatus.COMPLETED) {
+        throw new BadRequestException('⚠️ بلیط ابتدا باید تکمیل شود (وضعیت COMPLETED)، سپس می‌توانید آن را نهایی کنید');
+      }
+      newStatus = TicketStatus.FINALIZED;
+    }
+    else if (dto.status && dto.status !== ticket.status) {
+      throw new BadRequestException('❌ شما فقط می‌توانید وضعیت بلیط را به "تکمیل شده" یا "نهایی شده" تغییر دهید');
+    }
+  }
+
+  if (userRole !== UserRole.NORMAL_USER && dto.status === TicketStatus.FINALIZED) {
+    if (ticket.status !== TicketStatus.COMPLETED && ticket.status !== TicketStatus.FINALIZED) {
+      throw new BadRequestException('⚠️ بلیط باید در وضعیت COMPLETED باشد تا بتوان آن را نهایی کرد');
+    }
+  }
+
+  const updateData: any = {
+    ticketNumber: dto.ticketNumber ? this.sanitizeString(dto.ticketNumber) : undefined,
+    referenceNumber: dto.referenceNumber ? this.sanitizeString(dto.referenceNumber) : undefined,
+    passengerName: dto.passengerName ? this.sanitizeString(dto.passengerName) : undefined,
+    passengerPhone: dto.passengerPhone ? this.sanitizeString(dto.passengerPhone) : undefined,
+    flightNumber: dto.flightNumber ? this.sanitizeString(dto.flightNumber) : undefined,
+    seatClass: dto.seatClass ? this.sanitizeString(dto.seatClass) : undefined,
+    price: dto.price,
+    status: newStatus,
+  };
+
+  // فیلدهای جدید برای update
+  if (dto.passengerTitle) updateData.passengerTitle = dto.passengerTitle;
+  if (dto.nationality) updateData.nationality = dto.nationality;
+  if (dto.nationalCode) updateData.nationalCode = dto.nationalCode;
+  if (dto.passportNumber) updateData.passportNumber = dto.passportNumber;
+  if (dto.reservationPhone) updateData.reservationPhone = dto.reservationPhone;
+  if (dto.ageType) updateData.ageType = dto.ageType;
+  if (dto.gender) updateData.gender = dto.gender;
+  
+  // 🔥 اصلاح: استفاده از null به جای undefined برای departureDate
+  if (dto.departureDate !== undefined) {
+    updateData.departureDate = dto.departureDate ? new Date(dto.departureDate) : null;
+  }
+  
+  if (dto.route) updateData.route = dto.route;
+  if (dto.segment) updateData.segment = dto.segment;
+  if (dto.pnr) updateData.pnr = dto.pnr;
+  if (dto.tourCode) updateData.tourCode = dto.tourCode;
+  if (dto.source) updateData.source = dto.source;
+  if (dto.customerAirline) updateData.customerAirline = dto.customerAirline;
+  if (dto.sign) updateData.sign = dto.sign;
+  if (dto.currencyCode) updateData.currencyCode = dto.currencyCode;
+  if (dto.fare !== undefined) updateData.fare = dto.fare;
+  if (dto.fee !== undefined) updateData.fee = dto.fee;
+  if (dto.tax !== undefined) updateData.tax = dto.tax;
+  if (dto.vat !== undefined) updateData.vat = dto.vat;
+  if (dto.ancillary !== undefined) updateData.ancillary = dto.ancillary;
+  if (dto.discount !== undefined) updateData.discount = dto.discount;
+  if (dto.commission !== undefined) updateData.commission = dto.commission;
+  if (dto.commissionAmount !== undefined) updateData.commissionAmount = dto.commissionAmount;
+  if (dto.markup !== undefined) updateData.markup = dto.markup;
+  if (dto.salesType) updateData.salesType = dto.salesType;
+  if (dto.transactionType) updateData.transactionType = dto.transactionType;
+  
+  // 🔥 اصلاح: استفاده از null به جای undefined برای transactionDate
+  if (dto.transactionDate !== undefined) {
+    updateData.transactionDate = dto.transactionDate ? new Date(dto.transactionDate) : null;
+  }
+  
+  if (dto.referenceNo) updateData.referenceNo = dto.referenceNo;
+  if (dto.debit !== undefined) updateData.debit = dto.debit;
+  if (dto.credit !== undefined) updateData.credit = dto.credit;
+  if (dto.runningBalance !== undefined) updateData.runningBalance = dto.runningBalance;
+  if (dto.totalRefund !== undefined) updateData.totalRefund = dto.totalRefund;
+  if (dto.agentName) updateData.agentName = dto.agentName;
+  if (dto.agentCode) updateData.agentCode = dto.agentCode;
+  if (dto.agentIATACode) updateData.agentIATACode = dto.agentIATACode;
+  if (dto.originAirportId) updateData.originAirportId = dto.originAirportId;
+  if (dto.destinationAirportId) updateData.destinationAirportId = dto.destinationAirportId;
+
+  // 🔥 اصلاح: استفاده از null به جای undefined برای flightDate
+   if (dto.departureDate !== undefined) {
+    updateData.departureDate = dto.departureDate ? new Date(dto.departureDate) : new Date();
+  }
+
+  if (newStatus === TicketStatus.FINALIZED && ticket.status !== TicketStatus.FINALIZED) {
+    updateData.finalizedAt = new Date();
+  }
+
+  const updatedTicket = await this.prisma.ticket.update({
+    where: { id: ticketId },
+    data: updateData,
+  });
+
+  await this.prisma.activityLog.create({
+    data: {
+      userId: userId,
+      agencyId: agencyId,
+      action: 'UPDATE_TICKET',
+      entityType: 'Ticket',
+      entityId: ticketId,
+      oldData: { oldStatus: ticket.status },
+      newData: { newStatus: updatedTicket.status },
+    },
+  });
+
+  return updatedTicket;
+}
+
+  // ============ DELETE ============
   async delete(agencyId: string, userId: string, userRole: UserRole, ticketId: string) {
     const ticket = await this.getTicketWithAccess(ticketId, agencyId, userId, userRole === UserRole.NORMAL_USER);
 
@@ -359,8 +497,7 @@ export class TicketsService {
     return { message: '✅ بلیط با موفقیت حذف شد' };
   }
 
-  // ============ درخواست باز کردن بلیط (اصلاح شده - پشتیبانی از زنجیره ارجاع) ============
-
+  // ============ REQUEST UNLOCK ============
   async requestUnlock(agencyId: string, userId: string, ticketId: string, dto: RequestUnlockTicketDto) {
     await this.validateAgencyAccess(agencyId, userId, UserRole.NORMAL_USER);
     const ticket = await this.getTicketWithAccess(ticketId, agencyId, userId, true);
@@ -369,7 +506,6 @@ export class TicketsService {
       throw new BadRequestException('⚠️ فقط بلیط‌های نهایی شده یا فاکتور شده نیاز به درخواست باز کردن دارند');
     }
 
-    // بررسی درخواست قبلی باز (در هر وضعیتی غیر از RESOLVED یا CLOSED)
     const existingRequest = await this.prisma.supportTicket.findFirst({
       where: {
         agencyId: agencyId,
@@ -385,7 +521,6 @@ export class TicketsService {
 
     const sanitizedReason = this.sanitizeString(dto.reason);
     
-    // تعیین مرجع مقصد بر اساس نقش کاربر
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     let forwardedTo = 'AGENCY_MANAGER';
     
@@ -409,7 +544,6 @@ export class TicketsService {
       },
     });
 
-    // ثبت امتیاز منفی فقط برای کاربر عادی
     if (user?.role === UserRole.NORMAL_USER) {
       await this.prisma.penalty.create({
         data: {
@@ -441,8 +575,7 @@ export class TicketsService {
     };
   }
 
-  // ============ دریافت درخواست‌های باز کردن (بر اساس نقش) ============
-
+  // ============ GET UNLOCK REQUESTS ============
   async getUnlockRequests(agencyId: string, userId: string, userRole: UserRole) {
     await this.validateAgencyAccess(agencyId, userId);
 
@@ -479,8 +612,7 @@ export class TicketsService {
     return requests;
   }
 
-  // ============ پردازش درخواست باز کردن (تأیید/رد) ============
-
+  // ============ PROCESS UNLOCK REQUEST ============
   async processUnlockRequest(agencyId: string, managerId: string, requestId: string, dto: ProcessUnlockRequestDto) {
     await this.validateAgencyAccess(agencyId, managerId);
     
@@ -497,7 +629,6 @@ export class TicketsService {
       throw new NotFoundException('درخواست باز کردن بلیط یافت نشد');
     }
 
-    // بررسی دسترسی (مدیر آژانس یا مدیر کل)
     const user = await this.prisma.user.findUnique({ where: { id: managerId } });
     
     if (user?.role === UserRole.AGENCY_MANAGER && request.forwardedTo !== 'AGENCY_MANAGER') {
@@ -526,7 +657,6 @@ export class TicketsService {
     }
 
     if (dto.action === UnlockRequestAction.APPROVE) {
-      // باز کردن بلیط
       await this.prisma.ticket.update({
         where: { id: ticket.id },
         data: {
@@ -557,7 +687,6 @@ export class TicketsService {
       return { message: '✅ بلیط با موفقیت باز شد. کاربر می‌تواند بلیط را ویرایش کند.' };
     } 
     else {
-      // رد درخواست
       await this.prisma.supportTicket.update({
         where: { id: requestId },
         data: {
@@ -581,8 +710,7 @@ export class TicketsService {
     }
   }
 
-  // ============ باز کردن اجباری توسط مدیر کل ============
-
+  // ============ FORCE UNLOCK ============
   async forceUnlockTicket(agencyId: string, managerId: string, ticketId: string) {
     await this.validateAgencyAccess(agencyId, managerId);
     

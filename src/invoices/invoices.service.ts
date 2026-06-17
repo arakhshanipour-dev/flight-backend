@@ -1,3 +1,4 @@
+// src/invoices/invoices.service.ts
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateInvoiceDto, UpdateInvoiceDto } from './dto';
@@ -67,7 +68,6 @@ export class InvoicesService {
   async create(agencyId: string, userId: string, dto: CreateInvoiceDto) {
     const { user, agency } = await this.validateAgencyManagerAccess(agencyId, userId, false);
 
-    // Validate bank card
     const bankCard = await this.prisma.bankCard.findFirst({
       where: {
         id: dto.bankCardId,
@@ -80,7 +80,6 @@ export class InvoicesService {
       throw new BadRequestException('Invalid or inactive bank card');
     }
 
-    // Validate tickets
     const tickets = await this.prisma.ticket.findMany({
       where: {
         id: { in: dto.ticketIds },
@@ -92,23 +91,19 @@ export class InvoicesService {
       throw new BadRequestException('One or more tickets not found');
     }
 
-    // Check if any ticket is already invoiced
     const invoicedTicket = tickets.find(t => t.status === TicketStatus.INVOICED);
     if (invoicedTicket) {
       throw new BadRequestException(`Ticket ${invoicedTicket.ticketNumber} is already invoiced`);
     }
 
-    // Check if any ticket is not finalized
     const notFinalizedTicket = tickets.find(t => t.status !== TicketStatus.FINALIZED);
     if (notFinalizedTicket) {
       throw new BadRequestException(`Ticket ${notFinalizedTicket.ticketNumber} must be finalized before invoicing`);
     }
 
-    // Calculate totals
     const subtotal = tickets.reduce((sum, t) => sum + t.price, 0);
-    const total = subtotal; // Currently no tax, but can be extended
+    const total = subtotal;
 
-    // Determine customer name
     let customerName = dto.customerName;
     let organizationId = dto.organizationId;
 
@@ -130,10 +125,9 @@ export class InvoicesService {
       throw new BadRequestException('Customer name is required when invoicing multiple tickets without organization');
     }
 
-    // Generate invoice number
     const invoiceNumber = await this.generateInvoiceNumber(agencyId);
 
-    // Create invoice
+    // 🔥 اضافه کردن salesType و currencyCode
     const invoice = await this.prisma.invoice.create({
       data: {
         invoiceNumber,
@@ -146,6 +140,8 @@ export class InvoicesService {
         subtotal,
         total,
         status: InvoiceStatus.UNPAID,
+        salesType: 'STANDARD', // 🔥 جدید
+        currencyCode: 'IRR', // 🔥 جدید
         tickets: {
           connect: tickets.map(t => ({ id: t.id })),
         },
@@ -156,13 +152,11 @@ export class InvoicesService {
       },
     });
 
-    // Update ticket status to INVOICED
     await this.prisma.ticket.updateMany({
       where: { id: { in: dto.ticketIds } },
       data: { status: TicketStatus.INVOICED, invoiceId: invoice.id },
     });
 
-    // Log activity
     await this.prisma.activityLog.create({
       data: {
         userId: userId,
@@ -174,7 +168,6 @@ export class InvoicesService {
       },
     });
 
-    // Return with masked card number
     return {
       ...invoice,
       agencyName: agency.name,
@@ -232,12 +225,14 @@ export class InvoicesService {
               accountHolder: true,
             },
           },
-          payment: {
+          payments: {  // 🔥 تغییر: payment → payments
             select: {
               id: true,
               status: true,
               amount: true,
               trackingCode: true,
+              paymentMethod: true,
+              paidAt: true,
             },
           },
         },
@@ -258,6 +253,7 @@ export class InvoicesService {
           ...inv.bankCard,
           maskedCardNumber: '****-****-****-****',
         },
+        payments: inv.payments,  // 🔥 اضافه شده
       })),
       meta: {
         page,
@@ -279,7 +275,16 @@ export class InvoicesService {
       include: {
         tickets: true,
         bankCard: true,
-        payment: true,
+        payments: {  // 🔥 تغییر: payment → payments
+          select: {
+            id: true,
+            status: true,
+            amount: true,
+            trackingCode: true,
+            paymentMethod: true,
+            paidAt: true,
+          },
+        },
         organization: {
           select: {
             id: true,
@@ -309,60 +314,58 @@ export class InvoicesService {
         ...invoice.bankCard,
         maskedCardNumber: '****-****-****-****',
       },
+      payments: invoice.payments,  // 🔥 اضافه شده
     };
   }
 
-    async update(agencyId: string, userId: string, invoiceId: string, dto: UpdateInvoiceDto) {
+  async update(agencyId: string, userId: string, invoiceId: string, dto: UpdateInvoiceDto) {
     await this.validateAgencyManagerAccess(agencyId, userId, true);
 
     const invoice = await this.prisma.invoice.findFirst({
-        where: {
+      where: {
         id: invoiceId,
         agencyId: agencyId,
-        },
+      },
     });
 
     if (!invoice) {
-        throw new NotFoundException('Invoice not found');
+      throw new NotFoundException('Invoice not found');
     }
 
-    // Check if invoice can be updated
     if (invoice.status === InvoiceStatus.PAID) {
-        throw new BadRequestException('Cannot update a paid invoice');
+      throw new BadRequestException('Cannot update a paid invoice');
     }
 
-    // If status is being changed to CANCELLED
     if (dto.status === InvoiceStatus.CANCELLED) {
-        // Return tickets to FINALIZED status (only if not already cancelled)
-        await this.prisma.ticket.updateMany({
+      await this.prisma.ticket.updateMany({
         where: { invoiceId: invoiceId },
         data: { status: TicketStatus.FINALIZED, invoiceId: null },
-        });
+      });
     }
 
     const updatedInvoice = await this.prisma.invoice.update({
-        where: { id: invoiceId },
-        data: {
+      where: { id: invoiceId },
+      data: {
         customerName: dto.customerName,
         customerPhone: dto.customerPhone,
         templateStyle: dto.templateStyle,
         status: dto.status,
-        },
+      },
     });
 
     await this.prisma.activityLog.create({
-        data: {
+      data: {
         userId: userId,
         agencyId: agencyId,
         action: 'UPDATE_INVOICE',
         entityType: 'Invoice',
         entityId: invoiceId,
         newData: { updatedFields: Object.keys(dto) },
-        },
+      },
     });
 
     return updatedInvoice;
-    }
+  }
 
   async delete(agencyId: string, userId: string, invoiceId: string) {
     await this.validateAgencyManagerAccess(agencyId, userId, true);
@@ -373,7 +376,7 @@ export class InvoicesService {
         agencyId: agencyId,
       },
       include: {
-        payment: true,
+        payments: true,  // 🔥 تغییر: payment → payments
       },
     });
 
@@ -385,11 +388,10 @@ export class InvoicesService {
       throw new BadRequestException('Cannot delete a paid invoice');
     }
 
-    if (invoice.payment) {
-      throw new BadRequestException('Cannot delete an invoice with existing payment');
+    if (invoice.payments && invoice.payments.length > 0) {  // 🔥 تغییر
+      throw new BadRequestException('Cannot delete an invoice with existing payments');
     }
 
-    // Return tickets to FINALIZED status
     await this.prisma.ticket.updateMany({
       where: { invoiceId: invoiceId },
       data: { status: TicketStatus.FINALIZED, invoiceId: null },
@@ -410,8 +412,6 @@ export class InvoicesService {
     return { message: 'Invoice deleted successfully' };
   }
 
-  // ============ General Manager Approval ============
-
   async approveInvoice(agencyId: string, userId: string, invoiceId: string) {
     await this.validateAgencyManagerAccess(agencyId, userId, true);
 
@@ -426,9 +426,6 @@ export class InvoicesService {
     if (!invoice) {
       throw new NotFoundException('Unpaid invoice not found');
     }
-
-    // Approval is just marking that General Manager has reviewed
-    // The actual payment will be registered by Agency Manager
 
     await this.prisma.activityLog.create({
       data: {
@@ -463,6 +460,13 @@ export class InvoicesService {
           select: {
             bankName: true,
             accountHolder: true,
+          },
+        },
+        payments: {  // 🔥 اضافه شده
+          select: {
+            id: true,
+            amount: true,
+            status: true,
           },
         },
       },
