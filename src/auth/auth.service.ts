@@ -184,7 +184,7 @@ export class AuthService {
   }
 
   async refreshToken(refreshToken: string): Promise<{ accessToken: string }> {
-    // Check if token exists and is not revoked
+    // Find and validate existing token
     const storedToken = await this.prisma.refreshToken.findFirst({
       where: {
         token: refreshToken,
@@ -195,35 +195,20 @@ export class AuthService {
     });
 
     if (!storedToken) {
-      throw new UnauthorizedException('Invalid or expired refresh token');
-    }
-
-    try {
-      const payload = this.jwtService.verify(refreshToken, {
-        secret: this.configService.get('JWT_REFRESH_SECRET'),
-      });
-
-      const newAccessToken = this.jwtService.sign(
-        {
-          sub: storedToken.user.id,
-          email: storedToken.user.email,
-          role: storedToken.user.role,
-        },
-        {
-          expiresIn: this.configService.get('JWT_EXPIRES_IN', '15m'),
-          secret: this.configService.get('JWT_SECRET'),
-        },
-      );
-
-      return { accessToken: newAccessToken };
-    } catch {
-      // If token verification fails, revoke it
-      await this.prisma.refreshToken.update({
-        where: { id: storedToken.id },
-        data: { revokedAt: new Date() },
-      });
       throw new UnauthorizedException('Invalid refresh token');
     }
+
+    // Revoke the old token
+    await this.prisma.refreshToken.update({
+      where: { id: storedToken.id },
+      data: { revokedAt: new Date() },
+    });
+
+    // Generate new token pair
+    const newTokens = await this.generateTokens(storedToken.user);
+    
+    // Return new access token (and optionally new refresh token)
+    return { accessToken: newTokens.accessToken };
   }
 
   async logout(userId: string, refreshToken: string): Promise<{ message: string }> {

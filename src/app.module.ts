@@ -19,6 +19,8 @@ import { OrganizationsModule } from './organizations/organizations.module';
 import { SupportTicketsModule } from './support-tickets/support-tickets.module';
 import { AccountingModule } from './accounting/accounting.module';
 import { PlansModule } from './plans/plans.module';
+import { AirportsModule } from './airports/airports.module';
+import { AirlinesModule } from './airlines/airlines.module';
 
 @Module({
   imports: [
@@ -57,6 +59,8 @@ import { PlansModule } from './plans/plans.module';
     SupportTicketsModule,
     AccountingModule,
     PlansModule,
+    AirportsModule,
+    AirlinesModule,
   ],
   providers: [
     {
