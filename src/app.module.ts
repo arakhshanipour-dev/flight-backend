@@ -21,12 +21,20 @@ import { AccountingModule } from './accounting/accounting.module';
 import { PlansModule } from './plans/plans.module';
 import { AirportsModule } from './airports/airports.module';
 import { AirlinesModule } from './airlines/airlines.module';
+import { CacheModule } from '@nestjs/cache-manager';
+import { ActivityLogsModule } from './activity-logs/activity-logs.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: '.env',
+    }),
+
+    CacheModule.register({
+      ttl: 3600, // 1 hour default TTL
+      max: 100, // maximum number of items in cache
+      isGlobal: true, // باعث می‌شود در سراسر برنامه در دسترس باشد
     }),
     ThrottlerModule.forRoot([
       {
@@ -61,6 +69,7 @@ import { AirlinesModule } from './airlines/airlines.module';
     PlansModule,
     AirportsModule,
     AirlinesModule,
+    ActivityLogsModule
   ],
   providers: [
     {
